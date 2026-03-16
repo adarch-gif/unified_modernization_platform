@@ -1,4 +1,4 @@
-from unified_modernization.reconciliation.engine import ReconciliationEngine, StoreSnapshot
+from unified_modernization.reconciliation.engine import DocumentFingerprint, ReconciliationEngine, StoreSnapshot
 
 
 def test_reconciliation_detects_missing_and_drift() -> None:
@@ -21,3 +21,28 @@ def test_reconciliation_detects_missing_and_drift() -> None:
     assert "count_mismatch" in codes
     assert "missing_documents" in codes
     assert "checksum_drift" in codes
+
+
+def test_reconciliation_detects_tenant_cohort_and_delete_scope_drift() -> None:
+    engine = ReconciliationEngine()
+    source = StoreSnapshot(
+        name="source",
+        documents={
+            "1": DocumentFingerprint(checksum="aaa", tenant_id="t1", cohort="gold"),
+            "2": DocumentFingerprint(checksum="bbb", tenant_id="t1", cohort="silver", is_deleted=True),
+        },
+    )
+    target = StoreSnapshot(
+        name="target",
+        documents={
+            "1": DocumentFingerprint(checksum="aaa", tenant_id="t2", cohort="gold"),
+            "2": DocumentFingerprint(checksum="bbb", tenant_id="t1", cohort="silver"),
+        },
+    )
+
+    report = engine.compare(source, target)
+
+    codes = {finding.code for finding in report.findings}
+    assert "tenant_scope_mismatch" in codes
+    assert "delete_state_mismatch" in codes
+    assert "tenant_delete_scope_mismatch" in codes

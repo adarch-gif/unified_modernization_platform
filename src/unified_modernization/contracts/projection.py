@@ -43,6 +43,13 @@ class DependencyPolicy(BaseModel):
     allow_partial_optional_publish: bool = False
 
 
+class ProjectionKey(BaseModel):
+    tenant_id: str
+    domain_name: str
+    entity_type: str
+    logical_entity_id: str
+
+
 class FragmentRecord(BaseModel):
     tenant_id: str
     domain_name: str

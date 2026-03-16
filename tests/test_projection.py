@@ -1,8 +1,11 @@
+from pathlib import Path
+
 from datetime import UTC, datetime, timedelta
 
 from unified_modernization.contracts.events import CanonicalDomainEvent, SourceTechnology
 from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionStatus
 from unified_modernization.projection.builder import ProjectionBuilder
+from unified_modernization.projection.store import SqliteProjectionStateStore
 
 
 def test_projection_waits_for_required_fragment() -> None:
@@ -111,3 +114,33 @@ def test_projection_marks_stale_required_fragment() -> None:
 
     assert decision.publish is False
     assert decision.state.status == ProjectionStatus.PENDING_REHYDRATION
+
+
+def test_projection_state_persists_in_sqlite_store(tmp_path: Path) -> None:
+    store = SqliteProjectionStateStore(tmp_path / "projection.db")
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            )
+        ],
+        state_store=store,
+    )
+    event = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-2",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=1,
+        fragment_owner="document_core",
+        payload={"title": "Persisted"},
+    )
+
+    builder.upsert(event)
+    persisted_state = builder.get_state("tenant-1", "customer_documents", "customerDocument", "doc-2")
+
+    assert persisted_state is not None
+    assert persisted_state.status == ProjectionStatus.PUBLISHED
+    assert store.pending_count() == 0

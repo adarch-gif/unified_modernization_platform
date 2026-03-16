@@ -10,26 +10,40 @@ from unified_modernization.contracts.projection import (
     CompletenessStatus,
     DependencyPolicy,
     FragmentRecord,
+    ProjectionKey,
     ProjectionStateRecord,
     ProjectionStatus,
     PublicationDecision,
     SearchDocument,
 )
+from unified_modernization.projection.store import InMemoryProjectionStateStore, ProjectionStateStore
 
 
 class ProjectionBuilder:
-    """In-memory starter implementation of projection completeness and publication."""
+    """Projection completeness and publication logic backed by a pluggable state store."""
 
-    def __init__(self, policies: list[DependencyPolicy]) -> None:
+    def __init__(
+        self,
+        policies: list[DependencyPolicy],
+        state_store: ProjectionStateStore | None = None,
+    ) -> None:
         self._policies = {policy.entity_type: policy for policy in policies}
-        self._fragments: dict[tuple[str, str], dict[str, FragmentRecord]] = {}
-        self._states: dict[tuple[str, str], ProjectionStateRecord] = {}
+        self._state_store = state_store or InMemoryProjectionStateStore()
+
+    @staticmethod
+    def _projection_key(event: CanonicalDomainEvent) -> ProjectionKey:
+        return ProjectionKey(
+            tenant_id=event.tenant_id,
+            domain_name=event.domain_name,
+            entity_type=event.entity_type,
+            logical_entity_id=event.logical_entity_id,
+        )
 
     def upsert(self, event: CanonicalDomainEvent, now_utc: datetime | None = None) -> PublicationDecision:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
         policy = self._policies[event.entity_type]
-        key = (event.tenant_id, event.logical_entity_id)
-        fragments = self._fragments.setdefault(key, {})
+        key = self._projection_key(event)
+        fragments = self._state_store.get_fragments(key)
 
         incoming = FragmentRecord(
             tenant_id=event.tenant_id,
@@ -43,9 +57,8 @@ class ProjectionBuilder:
             payload=event.payload,
             delete_flag=event.change_type == ChangeType.DELETE,
         )
-        current = fragments.get(event.fragment_owner)
-        if current is None or incoming.source_version >= current.source_version:
-            fragments[event.fragment_owner] = incoming
+        self._state_store.upsert_fragment(key, incoming)
+        fragments = self._state_store.get_fragments(key)
 
         missing: list[str] = []
         stale: list[str] = []
@@ -58,7 +71,7 @@ class ProjectionBuilder:
             if rule.required and rule.is_stale(fragment.event_time_utc, now):
                 stale.append(rule.owner)
 
-        state = self._states.get(key) or ProjectionStateRecord(
+        state = self._state_store.get_state(key) or ProjectionStateRecord(
             tenant_id=event.tenant_id,
             domain_name=event.domain_name,
             entity_type=event.entity_type,
@@ -74,14 +87,14 @@ class ProjectionBuilder:
             state.status = ProjectionStatus.PENDING_REQUIRED_FRAGMENT
             state.reason_code = "missing_required_fragment"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._states[key] = state
+            self._state_store.save_state(key, state)
             return PublicationDecision(publish=False, state=state)
 
         if stale:
             state.status = ProjectionStatus.PENDING_REHYDRATION
             state.reason_code = "stale_required_fragment"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._states[key] = state
+            self._state_store.save_state(key, state)
             return PublicationDecision(publish=False, state=state)
 
         merged_payload: dict[str, Any] = {}
@@ -102,7 +115,7 @@ class ProjectionBuilder:
             state.completeness_status = CompletenessStatus.DELETED
             state.last_built_utc = now
             state.last_published_utc = now
-            self._states[key] = state
+            self._state_store.save_state(key, state)
             return PublicationDecision(
                 publish=True,
                 state=state,
@@ -123,7 +136,7 @@ class ProjectionBuilder:
             state.status = ProjectionStatus.PENDING_REQUIRED_FRAGMENT
             state.reason_code = "optional_publish_disabled"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._states[key] = state
+            self._state_store.save_state(key, state)
             return PublicationDecision(publish=False, state=state)
         if len(source_versions) < len(policy.rules):
             completeness = CompletenessStatus.PARTIAL
@@ -138,7 +151,7 @@ class ProjectionBuilder:
         state.completeness_status = completeness
         state.last_built_utc = now
         state.last_published_utc = now
-        self._states[key] = state
+        self._state_store.save_state(key, state)
 
         document = SearchDocument(
             document_id=event.logical_entity_id,
@@ -152,5 +165,20 @@ class ProjectionBuilder:
         )
         return PublicationDecision(publish=True, state=state, document=document)
 
-    def get_state(self, tenant_id: str, logical_entity_id: str) -> ProjectionStateRecord | None:
-        return self._states.get((tenant_id, logical_entity_id))
+    def get_state(
+        self,
+        tenant_id: str,
+        domain_name: str,
+        entity_type: str,
+        logical_entity_id: str,
+    ) -> ProjectionStateRecord | None:
+        key = ProjectionKey(
+            tenant_id=tenant_id,
+            domain_name=domain_name,
+            entity_type=entity_type,
+            logical_entity_id=logical_entity_id,
+        )
+        return self._state_store.get_state(key)
+
+    def pending_count(self) -> int:
+        return self._state_store.pending_count()

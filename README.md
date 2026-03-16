@@ -11,11 +11,14 @@ This repository is intentionally designed as a production-grade starter, not a f
 
 - Canonical domain event contract
 - Projection builder with incomplete-projection handling
+- Pluggable projection state store with durable SQLite implementation
 - Independent backend and search cutover state machines
-- Tenant routing policy engine
+- Tenant routing policy engine and alias-routing model
 - Search Gateway service and OData to Elasticsearch translator
+- Search evaluation harness with live overlap and offline judged relevance metrics
+- Backfill coordinator with side-load to stream-handoff planning
 - Firestore outbox normalization model
-- Reconciliation engine
+- Reconciliation engine with tenant, cohort, and delete-aware validation
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
@@ -106,12 +109,23 @@ But:
 - search cutover remains independent by domain
 - target-store decisions remain domain-specific
 
+## New production-grade seams in this repo
+
+- `projection/store.py`
+  Durable control-plane seam with `InMemoryProjectionStateStore` and `SqliteProjectionStateStore`
+- `backfill/coordinator.py`
+  Bulk side-load and stream handoff planner so historical backfill does not depend on the real-time bus
+- `gateway/evaluation.py`
+  Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
+- `routing/tenant_policy.py`
+  Shared-index versus dedicated-index alias routing policy
+
 ## Immediate next steps
 
-1. Replace in-memory stores with Spanner-backed or equivalent control-plane persistence.
+1. Add a Spanner-backed production implementation of the projection state store contract.
 2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
 3. Add a domain onboarding pipeline that consumes YAML config and instantiates adapters.
-4. Add end-to-end replay and DLQ handling.
+4. Add end-to-end replay, DLQ handling, and rehydration workers for pending projections.
 5. Add live Azure Search and Elasticsearch query clients behind the gateway.
 
 ## Status

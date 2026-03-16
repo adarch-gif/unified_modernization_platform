@@ -31,6 +31,22 @@ The projection builder solves the incomplete-projection problem by:
 - refusing to publish when required fragments are missing or stale
 - incrementing a projection version only when the materialized document changes
 
+The builder now depends on a `ProjectionStateStore` contract. The repo includes:
+
+- `InMemoryProjectionStateStore` for fast local tests
+- `SqliteProjectionStateStore` as a durable local control-plane implementation
+
+The production path is to implement the same contract on Spanner or an equivalently durable control-plane store.
+
+### Backfill coordinator
+
+Historical migration must not overload the real-time event path. The backfill coordinator therefore models:
+
+- bulk side-load directly into the projection plane
+- explicit capture of source high watermarks
+- a deterministic handoff to streaming CDC for the delta gap
+- prioritization of rehydration or repair for entities left pending after side-load
+
 ### Search Gateway
 
 The gateway preserves a stable client-facing contract and supports:
@@ -40,14 +56,33 @@ The gateway preserves a stable client-facing contract and supports:
 - canary mode
 - Elastic-only mode
 
+The gateway is tenant-routed. Queries resolve through the tenant policy engine into shared or dedicated Elasticsearch aliases before being sent to the target backend.
+
+### Search evaluation
+
+Search cutover evidence must include more than overlap counts. The evaluation harness now supports:
+
+- live shadow overlap metrics
+- offline judged relevance metrics such as `NDCG@10` and `MRR`
+- zero-result-rate tracking for query corpora
+
 ### Cutover state machines
 
 Backend and search state machines are separate because unified platform does not mean big-bang cutover.
 
 ### Reconciliation
 
-The reconciliation engine compares count and checksum evidence between systems. The current implementation is intentionally simple and should be extended to stratified and field-level validation for production use.
+The reconciliation engine now compares:
+
+- total counts
+- missing and unexpected documents
+- checksum drift
+- tenant-scope mismatches
+- cohort-scope mismatches
+- delete-state mismatches
+
+The next production extension should add field-level diff sampling and confidence thresholds by domain wave.
 
 ## Production evolution path
 
-The code in this repo is a starter. The next production step is replacing in-memory state with a strongly consistent control-plane store, then wiring real adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
+The code in this repo is still a starter, but it now includes the main scale seams. The next production step is implementing the durable store contract on Spanner, then wiring real adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
