@@ -10,7 +10,7 @@
 
 ## Phase 1
 
-- implement Spanner-backed projection state store from the durable store contract
+- wire the implemented Spanner-backed projection state store to real GCP environments
 - implement real source adapters
 - implement real Elasticsearch write client
 - implement gateway clients for Azure Search and Elasticsearch
@@ -21,6 +21,7 @@
 
 - add replay and DLQ handling
 - add reconciliation by entity cohort and tenant
+- move reconciliation from single-level buckets toward recursive bucket or Merkle validation
 - add domain onboarding config loader
 - add metrics and tracing
 - add judged query corpus and offline relevance evaluation workflow

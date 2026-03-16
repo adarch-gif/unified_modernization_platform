@@ -1,11 +1,15 @@
 from pathlib import Path
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from unified_modernization.contracts.events import CanonicalDomainEvent, SourceTechnology
-from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionStatus
+from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionKey, ProjectionStatus
 from unified_modernization.projection.builder import ProjectionBuilder
-from unified_modernization.projection.store import SqliteProjectionStateStore
+from unified_modernization.projection.store import (
+    SpannerProjectionStateStore,
+    SqliteProjectionStateStore,
+)
 
 
 def test_projection_waits_for_required_fragment() -> None:
@@ -144,3 +148,168 @@ def test_projection_state_persists_in_sqlite_store(tmp_path: Path) -> None:
     assert persisted_state is not None
     assert persisted_state.status == ProjectionStatus.PUBLISHED
     assert store.pending_count() == 0
+
+
+class _FakeSpannerSnapshot:
+    def __init__(self, fragments: dict[tuple[str, ...], dict[str, Any]], states: dict[tuple[str, ...], dict[str, Any]]) -> None:
+        self._fragments = fragments
+        self._states = states
+
+    def __enter__(self) -> "_FakeSpannerSnapshot":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    def execute_sql(
+        self,
+        sql: str,
+        params: dict[str, object] | None = None,
+        param_types: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
+        del param_types
+        params = params or {}
+        key = (
+            str(params.get("tenant_id", "")),
+            str(params.get("domain_name", "")),
+            str(params.get("entity_type", "")),
+            str(params.get("logical_entity_id", "")),
+        )
+        if "FROM projection_fragments" in sql and "source_version" not in sql:
+            rows = []
+            for fragment_owner, record in self._fragments.get(key, {}).items():
+                rows.append({"fragment_owner": fragment_owner, "payload_json": record["payload_json"]})
+            return rows
+        if "FROM projection_fragments" in sql and "source_version" in sql:
+            fragment = self._fragments.get(key, {}).get(str(params["fragment_owner"]))
+            return [] if fragment is None else [{"source_version": fragment["source_version"]}]
+        if "FROM projection_states" in sql and "payload_json" in sql:
+            state = self._states.get(key)
+            return [] if state is None else [{"payload_json": state["payload_json"]}]
+        if "SELECT status" in sql:
+            return [{"status": row["status"]} for row in self._states.values()]
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _FakeSpannerTransaction(_FakeSpannerSnapshot):
+    def execute_update(
+        self,
+        sql: str,
+        params: dict[str, object] | None = None,
+        param_types: dict[str, object] | None = None,
+    ) -> int:
+        del param_types
+        params = params or {}
+        key = (
+            str(params.get("tenant_id", "")),
+            str(params.get("domain_name", "")),
+            str(params.get("entity_type", "")),
+            str(params.get("logical_entity_id", "")),
+        )
+        if "projection_fragments" in sql:
+            fragment_owner = str(params["fragment_owner"])
+            self._fragments.setdefault(key, {})[fragment_owner] = {
+                "source_version": int(params["source_version"]),
+                "payload_json": str(params["payload_json"]),
+            }
+            return 1
+        if "projection_states" in sql:
+            self._states[key] = {
+                "status": str(params["status"]),
+                "payload_json": str(params["payload_json"]),
+            }
+            return 1
+        raise AssertionError(f"unexpected DML: {sql}")
+
+
+class _FakeSpannerDatabase:
+    def __init__(self) -> None:
+        self.fragments: dict[tuple[str, ...], dict[str, Any]] = {}
+        self.states: dict[tuple[str, ...], dict[str, Any]] = {}
+
+    def snapshot(self) -> _FakeSpannerSnapshot:
+        return _FakeSpannerSnapshot(self.fragments, self.states)
+
+    def run_in_transaction(self, func: object) -> object:
+        transaction = _FakeSpannerTransaction(self.fragments, self.states)
+        assert callable(func)
+        return func(transaction)
+
+
+def test_projection_state_persists_in_spanner_store() -> None:
+    database = _FakeSpannerDatabase()
+    store = SpannerProjectionStateStore(database)
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            )
+        ],
+        state_store=store,
+    )
+    event = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-3",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=5,
+        fragment_owner="document_core",
+        payload={"title": "Spanner"},
+    )
+
+    builder.upsert(event)
+    persisted_state = builder.get_state("tenant-1", "customer_documents", "customerDocument", "doc-3")
+
+    assert persisted_state is not None
+    assert persisted_state.status == ProjectionStatus.PUBLISHED
+    assert store.pending_count() == 0
+    assert len(database.fragments) == 1
+
+
+def test_spanner_store_ignores_older_fragment_versions() -> None:
+    database = _FakeSpannerDatabase()
+    store = SpannerProjectionStateStore(database)
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            )
+        ],
+        state_store=store,
+    )
+    newer = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-4",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=10,
+        fragment_owner="document_core",
+        payload={"title": "Newer"},
+    )
+    older = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-4",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=9,
+        fragment_owner="document_core",
+        payload={"title": "Older"},
+    )
+
+    builder.upsert(newer)
+    builder.upsert(older)
+    fragments = store.get_fragments(
+        ProjectionKey(
+            tenant_id="tenant-1",
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            logical_entity_id="doc-4",
+        )
+    )
+
+    assert fragments["document_core"].payload["title"] == "Newer"

@@ -35,6 +35,7 @@ The builder now depends on a `ProjectionStateStore` contract. The repo includes:
 
 - `InMemoryProjectionStateStore` for fast local tests
 - `SqliteProjectionStateStore` as a durable local control-plane implementation
+- `SpannerProjectionStateStore` as the production-oriented control-plane implementation path, including explicit Spanner DDL for fragments and projection state
 
 The production path is to implement the same contract on Spanner or an equivalently durable control-plane store.
 
@@ -81,8 +82,14 @@ The reconciliation engine now compares:
 - cohort-scope mismatches
 - delete-state mismatches
 
-The next production extension should add field-level diff sampling and confidence thresholds by domain wave.
+The repo also includes a bucketed anti-entropy layer that:
+
+- hashes documents into deterministic buckets
+- compares bucket digests before comparing individual documents
+- drills into only mismatched buckets when detailed document fingerprints are available
+
+The next production extension should add multi-level bucket recursion or Merkle-tree style validation for very large domains.
 
 ## Production evolution path
 
-The code in this repo is still a starter, but it now includes the main scale seams. The next production step is implementing the durable store contract on Spanner, then wiring real adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
+The code in this repo is still a starter, but it now includes the main scale seams. The next production step is wiring the Spanner store to a real deployed database, then wiring real adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.

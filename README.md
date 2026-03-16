@@ -12,6 +12,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Canonical domain event contract
 - Projection builder with incomplete-projection handling
 - Pluggable projection state store with durable SQLite implementation
+- Spanner-backed projection state store contract and schema-driven implementation path
 - Independent backend and search cutover state machines
 - Tenant routing policy engine and alias-routing model
 - Search Gateway service and OData to Elasticsearch translator
@@ -19,6 +20,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Backfill coordinator with side-load to stream-handoff planning
 - Firestore outbox normalization model
 - Reconciliation engine with tenant, cohort, and delete-aware validation
+- Bucketed anti-entropy reconciliation for hash-first drift detection
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
@@ -112,21 +114,23 @@ But:
 ## New production-grade seams in this repo
 
 - `projection/store.py`
-  Durable control-plane seam with `InMemoryProjectionStateStore` and `SqliteProjectionStateStore`
+  Durable control-plane seam with `InMemoryProjectionStateStore`, `SqliteProjectionStateStore`, and `SpannerProjectionStateStore`
 - `backfill/coordinator.py`
   Bulk side-load and stream handoff planner so historical backfill does not depend on the real-time bus
 - `gateway/evaluation.py`
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
+- `reconciliation/engine.py`
+  Snapshot reconciliation plus bucketed anti-entropy and bucket-level drill-down
 - `routing/tenant_policy.py`
   Shared-index versus dedicated-index alias routing policy
 
 ## Immediate next steps
 
-1. Add a Spanner-backed production implementation of the projection state store contract.
+1. Wire `SpannerProjectionStateStore` to a real `google-cloud-spanner` database in non-local environments and provision the published DDL.
 2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
-3. Add a domain onboarding pipeline that consumes YAML config and instantiates adapters.
+3. Extend bucketed reconciliation into a multi-level Merkle-style validation workflow for billion-document domains.
 4. Add end-to-end replay, DLQ handling, and rehydration workers for pending projections.
-5. Add live Azure Search and Elasticsearch query clients behind the gateway.
+5. Add live Azure Search and Elasticsearch query clients behind the gateway with circuit breakers and telemetry.
 
 ## Status
 

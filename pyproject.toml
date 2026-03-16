@@ -19,6 +19,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+gcp = [
+  "google-cloud-spanner>=3.49,<4",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
