@@ -67,7 +67,7 @@ class BackfillCoordinator:
         checkpoint_every: int = 50_000,
         now_utc: datetime | None = None,
     ) -> BackfillExecutionResult:
-        now = (now_utc or datetime.now(UTC)).astimezone(UTC)
+        fixed_now = None if now_utc is None else now_utc.astimezone(UTC)
         summary = BackfillExecutionSummary()
         start_from = checkpoint_store.load_position() if checkpoint_store is not None else 0
 
@@ -76,7 +76,8 @@ class BackfillCoordinator:
                 continue
             summary.ingested_events += 1
             summary.last_event_time_utc = event.event_time_utc
-            decision = self._projection_builder.upsert(event, now_utc=now)
+            effective_now = fixed_now or datetime.now(UTC).astimezone(UTC)
+            decision = self._projection_builder.upsert(event, now_utc=effective_now)
             if decision.publish:
                 if decision.state.status == ProjectionStatus.DELETED:
                     summary.deleted_documents += 1

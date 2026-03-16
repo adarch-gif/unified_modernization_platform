@@ -27,6 +27,7 @@ class DomainConfig(BaseModel):
 
     def to_dependency_policy(self) -> DependencyPolicy:
         return DependencyPolicy(
+            domain_name=self.name,
             entity_type=self.entity_type,
             rules=[rule.model_copy(deep=True) for rule in self.projection_policy.rules],
             allow_partial_optional_publish=self.projection_policy.allow_partial_optional_publish,

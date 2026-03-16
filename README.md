@@ -11,6 +11,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 
 - Canonical domain event contract
 - Projection builder with incomplete-projection handling
+- Domain-scoped dependency policy resolution for shared entity types across multiple domains
 - Atomic projection mutation through a pluggable projection state store
 - Pluggable projection state store with durable SQLite implementation
 - Spanner-backed projection state store contract and schema-driven implementation path
@@ -23,6 +24,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - ASGI app builder with production-aware auth, bounded request parsing, and explicit `422` OData translation failures
 - Search evaluation harness with live overlap and offline judged relevance metrics
 - Operational shadow quality gate with telemetry-ready events and canary auto-freeze on judged regression
+- Best-effort shadow and canary comparison paths that do not fail the primary request on shadow-only errors
 - Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
 - Gateway bootstrap that makes resilient wrappers and telemetry explicit at startup
 - Backfill coordinator with side-load to stream-handoff planning
@@ -32,6 +34,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Reconciliation engine with tenant, cohort, and delete-aware validation
 - Recursive bucketed anti-entropy reconciliation for hash-first drift detection
 - Projection runtime wrapper with backpressure and dead-letter handling
+- Priority-aware backpressure bypass for repair and pending-entity completion traffic
 - Observability primitives for structured events, counters, timings, and spans
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic

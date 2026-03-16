@@ -33,7 +33,12 @@ class ProjectionBuilder:
         state_store: ProjectionStateStore | None = None,
         environment: str = "dev",
     ) -> None:
-        self._policies = {policy.entity_type: policy for policy in policies}
+        self._policies: dict[tuple[str | None, str], DependencyPolicy] = {}
+        for policy in policies:
+            key = (policy.domain_name, policy.entity_type)
+            if key in self._policies:
+                raise ValueError(f"duplicate dependency policy for domain={policy.domain_name!r}, entity_type={policy.entity_type!r}")
+            self._policies[key] = policy
         self._environment = environment.lower()
         resolved_state_store = state_store or InMemoryProjectionStateStore()
         if self._environment not in _NON_PRODUCTION_ENVIRONMENTS and isinstance(
@@ -42,6 +47,15 @@ class ProjectionBuilder:
         ):
             raise ValueError("in-memory projection state is not allowed outside local/dev/test environments")
         self._state_store = resolved_state_store
+
+    def _resolve_policy(self, *, domain_name: str, entity_type: str) -> DependencyPolicy:
+        exact = self._policies.get((domain_name, entity_type))
+        if exact is not None:
+            return exact
+        fallback = self._policies.get((None, entity_type))
+        if fallback is not None:
+            return fallback
+        raise KeyError(f"no dependency policy configured for domain={domain_name!r}, entity_type={entity_type!r}")
 
     @staticmethod
     def _projection_key(event: CanonicalDomainEvent) -> ProjectionKey:
@@ -54,7 +68,7 @@ class ProjectionBuilder:
 
     def upsert(self, event: CanonicalDomainEvent, now_utc: datetime | None = None) -> PublicationDecision:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
-        policy = self._policies[event.entity_type]
+        policy = self._resolve_policy(domain_name=event.domain_name, entity_type=event.entity_type)
         key = self._projection_key(event)
 
         incoming = FragmentRecord(
@@ -154,10 +168,24 @@ class ProjectionBuilder:
             delete_flags.append(fragment.delete_flag)
 
         if delete_flags and all(delete_flags):
+            delete_payload_hash = hashlib.sha256(
+                json.dumps({"is_deleted": True, "source_versions": source_versions}, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if delete_payload_hash == state.last_payload_hash and state.status == ProjectionStatus.DELETED:
+                state.reason_code = "all_fragments_deleted"
+                state.completeness_status = CompletenessStatus.DELETED
+                state.last_built_utc = now
+                state.last_published_utc = now
+                return ProjectionMutationResult(
+                    entity=entity,
+                    decision=PublicationDecision(publish=False, state=state),
+                )
+
             state.projection_version += 1
             state.status = ProjectionStatus.DELETED
             state.reason_code = "all_fragments_deleted"
             state.completeness_status = CompletenessStatus.DELETED
+            state.last_payload_hash = delete_payload_hash
             state.last_built_utc = now
             state.last_published_utc = now
             return ProjectionMutationResult(

@@ -85,7 +85,8 @@ class SearchGatewayService:
             "entity_type": entity_type,
             "trace_id": trace_id,
         }
-        elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
+        self.last_shadow_comparison = None
+        self.last_shadow_quality_gate = None
         with self._telemetry_sink.start_span(
             "search.gateway.request",
             trace_id=trace_id,
@@ -102,10 +103,23 @@ class SearchGatewayService:
             if self._mode == TrafficMode.AZURE_ONLY:
                 return await self._azure.query(azure_request)
             if self._mode == TrafficMode.ELASTIC_ONLY:
+                elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
                 return await self._elastic.query(elastic_request)
             if self._mode == TrafficMode.SHADOW:
                 primary = await self._azure.query(azure_request)
-                shadow = await self._elastic.query(elastic_request)
+                try:
+                    elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
+                    shadow = await self._elastic.query(elastic_request)
+                except Exception as exc:
+                    self._record_shadow_failure(
+                        error=exc,
+                        mode=self._mode,
+                        entity_type=entity_type,
+                        trace_id=trace_id,
+                        primary_backend="azure",
+                        shadow_backend="elastic",
+                    )
+                    return primary
                 self.last_shadow_comparison = self._compare(primary, shadow)
                 self.last_shadow_quality_gate = self._evaluate_shadow_quality(
                     tenant_id=tenant_id,
@@ -119,7 +133,19 @@ class SearchGatewayService:
             if self._mode == TrafficMode.CANARY and self.canary_frozen:
                 self._telemetry_sink.increment("search.gateway.canary_frozen", tags={"backend": "azure"})
                 primary = await self._azure.query(azure_request)
-                shadow = await self._elastic.query(elastic_request)
+                try:
+                    elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
+                    shadow = await self._elastic.query(elastic_request)
+                except Exception as exc:
+                    self._record_shadow_failure(
+                        error=exc,
+                        mode=self._mode,
+                        entity_type=entity_type,
+                        trace_id=trace_id,
+                        primary_backend="azure",
+                        shadow_backend="elastic",
+                    )
+                    return primary
                 self.last_shadow_comparison = self._compare(primary, shadow)
                 self.last_shadow_quality_gate = self._evaluate_shadow_quality(
                     tenant_id=tenant_id,
@@ -132,8 +158,20 @@ class SearchGatewayService:
                 return primary
             if self._bucket(f"{tenant_id}:{consumer_id}") < self._canary_percent:
                 self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "elastic"})
+                elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
                 canary_response = await self._elastic.query(elastic_request)
-                azure_shadow = await self._azure.query(azure_request)
+                try:
+                    azure_shadow = await self._azure.query(azure_request)
+                except Exception as exc:
+                    self._record_shadow_failure(
+                        error=exc,
+                        mode=self._mode,
+                        entity_type=entity_type,
+                        trace_id=trace_id,
+                        primary_backend="elastic",
+                        shadow_backend="azure",
+                    )
+                    return canary_response
                 self.last_shadow_comparison = self._compare(azure_shadow, canary_response)
                 self.last_shadow_quality_gate = self._evaluate_shadow_quality(
                     tenant_id=tenant_id,
@@ -146,7 +184,19 @@ class SearchGatewayService:
                 return canary_response
             self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "azure"})
             primary = await self._azure.query(azure_request)
-            shadow = await self._elastic.query(elastic_request)
+            try:
+                elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
+                shadow = await self._elastic.query(elastic_request)
+            except Exception as exc:
+                self._record_shadow_failure(
+                    error=exc,
+                    mode=self._mode,
+                    entity_type=entity_type,
+                    trace_id=trace_id,
+                    primary_backend="azure",
+                    shadow_backend="elastic",
+                )
+                return primary
             self.last_shadow_comparison = self._compare(primary, shadow)
             self.last_shadow_quality_gate = self._evaluate_shadow_quality(
                 tenant_id=tenant_id,
@@ -273,6 +323,37 @@ class SearchGatewayService:
             tags={"entity_type": entity_type, "code": decision.event.code},
         )
         self._telemetry_sink.emit(event)
+
+    def _record_shadow_failure(
+        self,
+        *,
+        error: Exception,
+        mode: TrafficMode,
+        entity_type: str,
+        trace_id: str | None,
+        primary_backend: str,
+        shadow_backend: str,
+    ) -> None:
+        self.last_shadow_comparison = None
+        self.last_shadow_quality_gate = None
+        self._telemetry_sink.increment(
+            "search.shadow.backend_failure",
+            tags={"mode": mode.value, "entity_type": entity_type, "shadow_backend": shadow_backend},
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="search_shadow_backend_failure",
+                severity="warning",
+                trace_id=trace_id,
+                attributes={
+                    "mode": mode.value,
+                    "entity_type": entity_type,
+                    "primary_backend": primary_backend,
+                    "shadow_backend": shadow_backend,
+                    "error_type": type(error).__name__,
+                },
+            )
+        )
 
     @staticmethod
     def _decision_payload(decision: ShadowQualityDecision) -> dict[str, Any]:

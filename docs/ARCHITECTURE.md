@@ -27,6 +27,7 @@ All source adapters normalize vendor-specific changes into `CanonicalDomainEvent
 The projection builder solves the incomplete-projection problem by:
 
 - storing fragment state per logical entity
+- resolving dependency policy by domain and entity type, not entity type alone
 - applying dependency rules
 - refusing to publish when required fragments are missing or stale
 - incrementing a projection version only when the materialized document changes
@@ -80,6 +81,7 @@ The gateway also now supports:
 - operational shadow quality gates
 - telemetry-ready events when ranking quality falls below threshold
 - automatic canary freeze when judged regression exceeds configured thresholds
+- best-effort shadow execution so primary-serving traffic survives shadow-only failures
 - resilient backend wrappers for timeout, retry, and circuit-breaker behavior
 - bootstrap-time enforcement so production startup does not silently use raw backends or no-op telemetry
 
@@ -132,7 +134,7 @@ This is intentionally Merkle-like rather than a naive full-snapshot compare. The
 
 The repo now includes operational scaffolding around the core architecture:
 
-- `projection/runtime.py` adds backpressure control and dead-letter handling around projection mutation
+- `projection/runtime.py` adds backpressure control, priority-aware bypass for completion traffic, and dead-letter handling around projection mutation
 - `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
 - `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
 - `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions

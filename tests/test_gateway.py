@@ -72,6 +72,27 @@ def test_translate_filter_rejects_unknown_fields() -> None:
         translator.translate({"$filter": "Tier eq 'gold'"})
 
 
+def test_gateway_azure_only_does_not_build_elastic_request() -> None:
+    azure = _FakeBackend({"results": [{"id": "azure-doc"}]})
+    service = SearchGatewayService(
+        azure_backend=azure,
+        elastic_backend=_FakeBackend({"results": [{"id": "elastic-doc"}]}),
+        mode=TrafficMode.AZURE_ONLY,
+        translator=_ExplodingTranslator(),  # type: ignore[arg-type]
+    )
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$filter": "Tier eq 'gold'"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "azure-doc"
+
+
 class _FakeBackend:
     def __init__(self, response: dict) -> None:
         self.response = response
@@ -95,6 +116,21 @@ class _FlakyBackend:
             raise TimeoutError("backend timeout")
         index = min(self.calls - self._failures - 1, len(self._responses) - 1)
         return self._responses[index]
+
+
+class _AlwaysFailingBackend:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("backend failure")
+
+    async def query(self, request: dict) -> dict:
+        del request
+        raise self._exc
+
+
+class _ExplodingTranslator:
+    def translate(self, params: dict[str, str]) -> dict:
+        del params
+        raise AssertionError("translator should not be used for this request path")
 
 
 class _StaticJudgmentProvider:
@@ -160,6 +196,57 @@ def test_shadow_comparison_uses_live_overlap_metrics() -> None:
     assert service.last_shadow_comparison is not None
     assert service.last_shadow_comparison["overlap_at_k"] == 1
     assert service.last_shadow_comparison["identical_order"] is False
+
+
+def test_shadow_mode_returns_primary_when_shadow_backend_fails() -> None:
+    telemetry = InMemoryTelemetrySink()
+    service = SearchGatewayService(
+        azure_backend=_FakeBackend({"results": [{"id": "azure-doc"}]}),
+        elastic_backend=_AlwaysFailingBackend(),
+        mode=TrafficMode.SHADOW,
+        telemetry_sink=telemetry,
+    )
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "azure-doc"
+    assert service.last_shadow_comparison is None
+    assert telemetry.counters[
+        ("search.shadow.backend_failure", (("entity_type", "customerDocument"), ("mode", "shadow"), ("shadow_backend", "elastic")))
+    ] == 1
+
+
+def test_canary_primary_elastic_survives_azure_shadow_failure() -> None:
+    telemetry = InMemoryTelemetrySink()
+    service = SearchGatewayService(
+        azure_backend=_AlwaysFailingBackend(),
+        elastic_backend=_FakeBackend({"results": [{"id": "elastic-doc"}]}),
+        mode=TrafficMode.CANARY,
+        canary_percent=100,
+        telemetry_sink=telemetry,
+    )
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "elastic-doc"
+    assert service.last_shadow_comparison is None
+    assert telemetry.counters[
+        ("search.shadow.backend_failure", (("entity_type", "customerDocument"), ("mode", "canary"), ("shadow_backend", "azure")))
+    ] == 1
 
 
 def test_evaluation_harness_calculates_ndcg_and_mrr() -> None:

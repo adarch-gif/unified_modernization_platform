@@ -37,6 +37,7 @@ class DependencyRule(BaseModel):
 
 
 class DependencyPolicy(BaseModel):
+    domain_name: str | None = None
     entity_type: str
     rules: list[DependencyRule]
     allow_partial_optional_publish: bool = False

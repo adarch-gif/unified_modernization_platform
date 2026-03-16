@@ -5,8 +5,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
-from unified_modernization.contracts.events import CanonicalDomainEvent
-from unified_modernization.contracts.projection import PublicationDecision
+from unified_modernization.contracts.events import CanonicalDomainEvent, ChangeType
+from unified_modernization.contracts.projection import ProjectionStatus, PublicationDecision
 from unified_modernization.observability.telemetry import NoopTelemetrySink, TelemetryEvent, TelemetrySink
 from unified_modernization.projection.builder import ProjectionBuilder
 
@@ -94,28 +94,35 @@ class ProjectionRuntime:
         pending_documents = self._projection_builder.pending_count()
         pressure = self._backpressure_controller.evaluate(pending_documents)
         if not pressure.accepted:
-            self._telemetry_sink.increment(
-                "projection.backpressure.rejected",
-                tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-            )
-            self._telemetry_sink.emit(
-                TelemetryEvent(
-                    event_type="projection_backpressure",
-                    severity="warning",
-                    trace_id=event.trace_id,
-                    attributes={
-                        "tenant_id": event.tenant_id,
-                        "logical_entity_id": event.logical_entity_id,
-                        "pending_documents": pending_documents,
-                        "reason_code": pressure.reason_code,
-                    },
+            bypass_reason = self._backpressure_bypass_reason(event)
+            if bypass_reason is not None:
+                self._telemetry_sink.increment(
+                    "projection.backpressure.bypassed",
+                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type, "reason": bypass_reason},
                 )
-            )
-            return ProjectionRuntimeResult(
-                accepted=False,
-                throttled=True,
-                reason_code=pressure.reason_code,
-            )
+            else:
+                self._telemetry_sink.increment(
+                    "projection.backpressure.rejected",
+                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+                )
+                self._telemetry_sink.emit(
+                    TelemetryEvent(
+                        event_type="projection_backpressure",
+                        severity="warning",
+                        trace_id=event.trace_id,
+                        attributes={
+                            "tenant_id": event.tenant_id,
+                            "logical_entity_id": event.logical_entity_id,
+                            "pending_documents": pending_documents,
+                            "reason_code": pressure.reason_code,
+                        },
+                    )
+                )
+                return ProjectionRuntimeResult(
+                    accepted=False,
+                    throttled=True,
+                    reason_code=pressure.reason_code,
+                )
 
         try:
             decision = self._projection_builder.upsert(event, now_utc=now_utc)
@@ -164,3 +171,24 @@ class ProjectionRuntime:
             decision=decision,
             reason_code="processed",
         )
+
+    def _backpressure_bypass_reason(self, event: CanonicalDomainEvent) -> str | None:
+        if event.change_type in {ChangeType.REPAIR, ChangeType.REFRESH}:
+            return "priority_change_type"
+        state = self._projection_builder.get_state(
+            event.tenant_id,
+            event.domain_name,
+            event.entity_type,
+            event.logical_entity_id,
+        )
+        if state is None:
+            return None
+        if state.status in {
+            ProjectionStatus.PENDING_REQUIRED_FRAGMENT,
+            ProjectionStatus.PENDING_REHYDRATION,
+            ProjectionStatus.STALE,
+            ProjectionStatus.QUARANTINED,
+            ProjectionStatus.READY_TO_BUILD,
+        }:
+            return "pending_entity_completion"
+        return None

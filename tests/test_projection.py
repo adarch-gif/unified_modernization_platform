@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from unified_modernization.contracts.events import CanonicalDomainEvent, SourceTechnology
+from unified_modernization.contracts.events import CanonicalDomainEvent, ChangeType, SourceTechnology
 from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionKey, ProjectionStatus
 from unified_modernization.projection.bootstrap import build_projection_builder
 from unified_modernization.projection.builder import ProjectionBuilder
@@ -93,6 +93,54 @@ def test_projection_publishes_when_required_fragments_arrive() -> None:
     assert decision.state.status == ProjectionStatus.PUBLISHED
 
 
+def test_projection_domain_scoped_policies_do_not_collide() -> None:
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                domain_name="customer_documents",
+                entity_type="sharedDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            ),
+            DependencyPolicy(
+                domain_name="account_documents",
+                entity_type="sharedDocument",
+                rules=[DependencyRule(owner="account_profile", required=True)],
+            ),
+        ]
+    )
+
+    customer_decision = builder.upsert(
+        CanonicalDomainEvent(
+            domain_name="customer_documents",
+            entity_type="sharedDocument",
+            logical_entity_id="doc-1",
+            tenant_id="tenant-1",
+            source_technology=SourceTechnology.COSMOS,
+            source_version=1,
+            fragment_owner="document_core",
+            payload={"title": "Customer"},
+            event_time_utc=datetime.now(UTC),
+        )
+    )
+    account_decision = builder.upsert(
+        CanonicalDomainEvent(
+            domain_name="account_documents",
+            entity_type="sharedDocument",
+            logical_entity_id="doc-2",
+            tenant_id="tenant-1",
+            source_technology=SourceTechnology.COSMOS,
+            source_version=1,
+            fragment_owner="document_core",
+            payload={"title": "Account"},
+            event_time_utc=datetime.now(UTC),
+        )
+    )
+
+    assert customer_decision.publish is True
+    assert account_decision.publish is False
+    assert account_decision.state.missing_required_fragments == ["account_profile"]
+
+
 def test_projection_marks_stale_required_fragment() -> None:
     builder = ProjectionBuilder(
         [
@@ -152,6 +200,38 @@ def test_projection_state_persists_in_sqlite_store(tmp_path: Path) -> None:
     assert persisted_state.status == ProjectionStatus.PUBLISHED
     assert persisted_state.entity_revision >= 1
     assert store.pending_count() == 0
+
+
+def test_duplicate_delete_event_is_idempotent() -> None:
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            )
+        ]
+    )
+    delete_event = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-delete",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=7,
+        change_type=ChangeType.DELETE,
+        fragment_owner="document_core",
+        payload={},
+        event_time_utc=datetime.now(UTC),
+    )
+
+    first = builder.upsert(delete_event)
+    second = builder.upsert(delete_event)
+
+    assert first.publish is True
+    assert first.state.status == ProjectionStatus.DELETED
+    assert second.publish is False
+    assert second.state.status == ProjectionStatus.DELETED
+    assert second.state.projection_version == first.state.projection_version
 
 
 class _FakeSpannerSnapshot:
