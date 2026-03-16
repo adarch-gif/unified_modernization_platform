@@ -262,6 +262,14 @@ class CanonicalDomainEvent(BaseModel):
     trace_id: str                     # Distributed trace correlation ID
 ```
 
+**Enum values:**
+- `SourceTechnology`: `azure_sql`, `cosmos`, `spanner`, `firestore`, `alloydb`, `outbox`
+- `ChangeType`: `upsert`, `delete`, `refresh`, `repair`
+
+**`refresh` vs `repair`:**
+- `REFRESH` is source-driven re-ingestion of the current source-of-truth state, such as Debezium snapshot `op=r` records or a controlled replay from the upstream system.
+- `REPAIR` is an operator- or system-triggered corrective re-evaluation for a specific entity after a known bad state, poison message, or reconciliation mismatch.
+
 **Key design decision — `ordering_key`:**
 The property `ordering_key = f"{tenant_id}|{domain_name}|{logical_entity_id}"` must be used as the message-broker partition/ordering key so all change events for a given entity arrive in causal order on the same consumer lane.
 
@@ -313,6 +321,8 @@ PUBLISHED                 ──(all fragments deleted)    ──► DELETED
 PUBLISHED                 ──(fragment update, same hash)► PUBLISHED (no-op)
 any state                 ──(poison message)           ──► QUARANTINED
 ```
+
+`READY_TO_BUILD` is a transient internal state used to mark entities that have enough acceptable fragments to attempt a build. `ProjectionRuntime` also treats it as a backpressure-bypass state so entities already near completion are allowed through under load.
 
 ### 4.4 `SearchDocument` (`contracts/projection.py`)
 
@@ -574,13 +584,15 @@ CREATE TABLE projection_fragments (
 
 **`commit_timestamp`** uses `allow_commit_timestamp=true` so Spanner fills it in atomically at commit time — never set it manually.
 
-**`entity_revision`** (optimistic lock counter) is incremented on every `_finalize_mutation()` call. Spanner `mutate_entity()` raises `ValueError("projection entity mutation must persist a state record")` if the mutator returns a `None` state — callers must always return a state record.
+**`entity_revision`** is the optimistic concurrency counter. It is incremented on every accepted mutation finalized by the store, even if the merged payload hash does not change and no new publish occurs. Payload-hash idempotency (`last_payload_hash`) is a separate mechanism used to decide whether `projection_version` should advance and whether a fresh document payload is materially different. Spanner `mutate_entity()` raises `ValueError("projection entity mutation must persist a state record")` if the mutator returns a `None` state — callers must always return a state record.
 
 #### `ProjectionRuntime` (`runtime.py`)
 
 The operational wrapper that adds:
 - **Backpressure:** If `pending_count >= max_pending_documents` (default: **100,000**), events are throttled unless a bypass condition applies.
   - **Bypass condition 1 — Priority change type:** `REPAIR` or `REFRESH` events always bypass, tagged `reason="priority_change_type"`.
+    - `REPAIR` = corrective replay for a known-bad entity or operator-triggered fixup.
+    - `REFRESH` = source-driven re-read or snapshot replay of current state.
   - **Bypass condition 2 — Pending entity completion:** If the entity's current status is `PENDING_REQUIRED_FRAGMENT`, `PENDING_REHYDRATION`, `STALE`, `QUARANTINED`, or `READY_TO_BUILD`, the event bypasses backpressure, tagged `reason="pending_entity_completion"`. This ensures entities already in the pipeline can complete even under load.
   - Events that fail both bypass checks are throttled (`result.throttled=True`); caller must retry or send to a retry queue.
 - **Dead Letter Queue:** If projection fails (exception in `upsert()`), the entity is quarantined AND the event is written to DLQ. If publish fails, the event+document are written to DLQ.
@@ -874,6 +886,8 @@ python -m unified_modernization.gateway.harness \
 
 Every backend is wrapped in `ResilientSearchBackend`. The `name` parameter is **required** (used in telemetry tags):
 
+**Important:** The values in the constructor example below are the `ResilientSearchBackend` class defaults when instantiated directly. Production gateway bootstrapping wires different values through `GatewayRuntimeConfig` — see the verified runtime-default table immediately below.
+
 ```python
 ResilientSearchBackend(
     backend=AzureAISearchBackend(config),
@@ -887,7 +901,7 @@ ResilientSearchBackend(
 )
 ```
 
-**`GatewayRuntimeConfig` wired defaults** (used when instantiated via `build_http_search_gateway_service_from_env()`):
+**`GatewayRuntimeConfig` wired defaults** (verified against `gateway/bootstrap.py`, used when instantiated via `build_http_search_gateway_service_from_env()`):
 
 | Parameter | `GatewayRuntimeConfig` default | Env var |
 |---|---|---|
@@ -926,7 +940,7 @@ Telemetry emitted by `ResilientSearchBackend`:
 **Path B — Live comparison only (overlap):** fires when no judgment is available:
 - If `overlap_rate_at_k < min_overlap_rate_at_k` → `ShadowQualityEvent(code="shadow_overlap_regression", severity="medium")`
 
-**Actual default thresholds:**
+**Actual default thresholds** (verified against `gateway/evaluation.py`):
 ```python
 ShadowQualityGate(
     min_overlap_rate_at_k=0.5,     # default: 50% overlap (Path B only)
