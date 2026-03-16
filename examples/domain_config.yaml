@@ -1,0 +1,20 @@
+domains:
+  - name: customer_documents
+    entity_type: customerDocument
+    current_source: cosmos
+    target_store: spanner
+    routing:
+      dedicated_tenants:
+        - tenant-enterprise-001
+    projection_policy:
+      allow_partial_optional_publish: false
+      rules:
+        - owner: document_core
+          required: true
+          freshness_ttl_seconds: 900
+        - owner: customer_profile
+          required: true
+          freshness_ttl_seconds: 900
+        - owner: optional_tags
+          required: false
+          freshness_ttl_seconds: 3600
