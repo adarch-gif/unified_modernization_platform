@@ -12,3 +12,5 @@ build/
 .coverage
 htmlcov/
 .DS_Store
+artifacts/
+*.env.local

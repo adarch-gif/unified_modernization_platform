@@ -120,6 +120,18 @@ UMP_GATEWAY_FIELD_MAP=Status=status,Tier=tier,Region=region
 UMP_TELEMETRY_MODE=memory
 ```
 
+If you want a timestamped artifact automatically written under `artifacts/gateway_harness`, use the wrapper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_gateway_harness.ps1 `
+  -EnvFile gateway_runtime.env.local `
+  -CasesFile examples/search_harness_cases.jsonl `
+  -Concurrency 8 `
+  -Iterations 20
+```
+
+Start from [gateway_runtime.env.template](C:\Users\ados1\unified-modernization-platform\examples\gateway_runtime.env.template) and fill in the real endpoint and credential values locally.
+
 ### Health endpoint
 
 ```text
@@ -190,6 +202,8 @@ But:
   OpenTelemetry-compatible telemetry sink that maps the platform telemetry protocol to OTLP-ready traces and metrics
 - `observability/bootstrap.py`
   Environment-driven telemetry sink selection for noop, memory, logger, or OTLP HTTP export modes
+- `scripts/run_gateway_harness.ps1`
+  Windows-friendly wrapper that loads env, runs the harness, and writes timestamped rollout evidence to `artifacts/`
 - `reconciliation/engine.py`
   Snapshot reconciliation plus recursive bucketed anti-entropy, remote paginated bucket fetch, and bucket-level drill-down
 - `routing/tenant_policy.py`
