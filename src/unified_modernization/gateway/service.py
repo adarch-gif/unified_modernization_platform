@@ -53,6 +53,7 @@ class SearchGatewayService:
         telemetry_sink: TelemetrySink | None = None,
         mode: TrafficMode = TrafficMode.AZURE_ONLY,
         canary_percent: int = 0,
+        auto_disable_canary_on_regression: bool = True,
     ) -> None:
         self._azure = azure_backend
         self._elastic = elastic_backend
@@ -64,6 +65,9 @@ class SearchGatewayService:
         self._telemetry_sink = telemetry_sink or NoopTelemetrySink()
         self._mode = mode
         self._canary_percent = canary_percent
+        self._auto_disable_canary_on_regression = auto_disable_canary_on_regression
+        self.canary_frozen = False
+        self.last_canary_freeze_event: dict[str, Any] | None = None
         self.last_shadow_comparison: dict[str, Any] | None = None
         self.last_shadow_quality_gate: dict[str, Any] | None = None
 
@@ -112,11 +116,47 @@ class SearchGatewayService:
                     live_comparison=self.last_shadow_comparison,
                 )
                 return primary
+            if self._mode == TrafficMode.CANARY and self.canary_frozen:
+                self._telemetry_sink.increment("search.gateway.canary_frozen", tags={"backend": "azure"})
+                primary = await self._azure.query(azure_request)
+                shadow = await self._elastic.query(elastic_request)
+                self.last_shadow_comparison = self._compare(primary, shadow)
+                self.last_shadow_quality_gate = self._evaluate_shadow_quality(
+                    tenant_id=tenant_id,
+                    entity_type=entity_type,
+                    raw_params=raw_params,
+                    primary=primary,
+                    shadow=shadow,
+                    live_comparison=self.last_shadow_comparison,
+                )
+                return primary
             if self._bucket(f"{tenant_id}:{consumer_id}") < self._canary_percent:
                 self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "elastic"})
-                return await self._elastic.query(elastic_request)
+                canary_response = await self._elastic.query(elastic_request)
+                azure_shadow = await self._azure.query(azure_request)
+                self.last_shadow_comparison = self._compare(azure_shadow, canary_response)
+                self.last_shadow_quality_gate = self._evaluate_shadow_quality(
+                    tenant_id=tenant_id,
+                    entity_type=entity_type,
+                    raw_params=raw_params,
+                    primary=azure_shadow,
+                    shadow=canary_response,
+                    live_comparison=self.last_shadow_comparison,
+                )
+                return canary_response
             self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "azure"})
-            return await self._azure.query(azure_request)
+            primary = await self._azure.query(azure_request)
+            shadow = await self._elastic.query(elastic_request)
+            self.last_shadow_comparison = self._compare(primary, shadow)
+            self.last_shadow_quality_gate = self._evaluate_shadow_quality(
+                tenant_id=tenant_id,
+                entity_type=entity_type,
+                raw_params=raw_params,
+                primary=primary,
+                shadow=shadow,
+                live_comparison=self.last_shadow_comparison,
+            )
+            return primary
         raise RuntimeError(f"unsupported traffic mode {self._mode}")
 
     def _bucket(self, consumer_id: str) -> int:
@@ -191,6 +231,7 @@ class SearchGatewayService:
                 tags={"code": decision.event.code, "entity_type": entity_type},
             )
             self._telemetry_sink.emit(payload)
+            self._maybe_disable_canary(decision, entity_type=entity_type)
         elif shadow_metrics is not None:
             self._telemetry_sink.emit(
                 TelemetryEvent(
@@ -204,6 +245,34 @@ class SearchGatewayService:
                 )
             )
         return payload
+
+    def _maybe_disable_canary(
+        self,
+        decision: ShadowQualityDecision,
+        *,
+        entity_type: str,
+    ) -> None:
+        if not self._auto_disable_canary_on_regression or self._mode != TrafficMode.CANARY:
+            return
+        if decision.event is None:
+            return
+        self.canary_frozen = True
+        self._canary_percent = 0
+        event = {
+            "event_type": "canary_auto_disabled",
+            "severity": "high",
+            "attributes": {
+                "entity_type": entity_type,
+                "code": decision.event.code,
+                "query_id": decision.event.query_id or "",
+            },
+        }
+        self.last_canary_freeze_event = event
+        self._telemetry_sink.increment(
+            "search.gateway.canary_auto_disabled",
+            tags={"entity_type": entity_type, "code": decision.event.code},
+        )
+        self._telemetry_sink.emit(event)
 
     @staticmethod
     def _decision_payload(decision: ShadowQualityDecision) -> dict[str, Any]:

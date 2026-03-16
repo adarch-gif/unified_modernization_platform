@@ -79,6 +79,7 @@ The gateway also now supports:
 
 - operational shadow quality gates
 - telemetry-ready events when ranking quality falls below threshold
+- automatic canary freeze when judged regression exceeds configured thresholds
 - resilient backend wrappers for timeout, retry, and circuit-breaker behavior
 - bootstrap-time enforcement so production startup does not silently use raw backends or no-op telemetry
 
@@ -116,8 +117,9 @@ The repo also includes a bucketed anti-entropy layer that:
 - hashes documents into deterministic buckets
 - compares bucket digests before comparing individual documents
 - recursively refines only mismatched buckets when detailed document fingerprints are available
+- supports a remote-store seam so mismatched buckets can be paged in over the network instead of materializing full snapshots
 
-This is intentionally Merkle-like rather than a naive full-snapshot compare. The next production extension is to back this with a remote digest API so even drill-down fingerprint transfer stays bounded.
+This is intentionally Merkle-like rather than a naive full-snapshot compare. The remote-store seam exists so deployed implementations can back drill-down with bounded digest and paginated document APIs instead of whole-dataset transfer.
 
 ## Operational wrappers
 

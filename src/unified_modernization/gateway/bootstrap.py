@@ -17,6 +17,7 @@ class GatewayRuntimeConfig(BaseModel):
     environment: str = "dev"
     mode: TrafficMode = TrafficMode.AZURE_ONLY
     canary_percent: int = Field(default=0, ge=0, le=100)
+    auto_disable_canary_on_regression: bool = True
     azure_timeout_seconds: float = Field(default=2.0, gt=0)
     elastic_timeout_seconds: float = Field(default=1.0, gt=0)
     max_retries: int = Field(default=2, ge=0)
@@ -79,4 +80,5 @@ def build_search_gateway_service(
         telemetry_sink=telemetry,
         mode=config.mode,
         canary_percent=config.canary_percent,
+        auto_disable_canary_on_regression=config.auto_disable_canary_on_regression,
     )

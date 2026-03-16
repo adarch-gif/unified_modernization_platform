@@ -21,7 +21,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Search Gateway service and OData to Elasticsearch translator
 - ASGI gateway middleware with API-key protection and request-size guard
 - Search evaluation harness with live overlap and offline judged relevance metrics
-- Operational shadow quality gate with telemetry-ready events
+- Operational shadow quality gate with telemetry-ready events and canary auto-freeze on judged regression
 - Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
 - Gateway bootstrap that makes resilient wrappers and telemetry explicit at startup
 - Backfill coordinator with side-load to stream-handoff planning
@@ -135,6 +135,8 @@ But:
   YAML loader that turns domain onboarding config into runtime dependency policies
 - `gateway/evaluation.py`
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
+- `gateway/service.py`
+  Canary-aware search flow that can automatically freeze Elastic ramp-up when judged shadow quality regresses
 - `gateway/asgi.py`
   API-key middleware, request-size limits, and explicit error handling for the lightweight gateway surface
 - `gateway/resilience.py`
@@ -144,7 +146,7 @@ But:
 - `observability/telemetry.py`
   Structured telemetry events, counters, timings, and trace-like spans
 - `reconciliation/engine.py`
-  Snapshot reconciliation plus recursive bucketed anti-entropy and bucket-level drill-down
+  Snapshot reconciliation plus recursive bucketed anti-entropy, remote paginated bucket fetch, and bucket-level drill-down
 - `routing/tenant_policy.py`
   Shared-index versus dedicated-index alias routing policy plus whale-tenant ingestion partitioning
 - `projection/bootstrap.py`

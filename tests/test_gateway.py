@@ -293,3 +293,61 @@ def test_gateway_emits_metrics_for_shadow_mismatch() -> None:
 
     assert any(event["event_type"] == "search.gateway.request.start" for event in telemetry.events)
     assert telemetry.counters[("search.shadow.order_mismatch", (("entity_type", "customerDocument"),))] == 1
+
+
+def test_canary_auto_disables_on_relevance_regression() -> None:
+    azure = _FakeBackend({"results": [{"id": "doc-1"}, {"id": "doc-2"}]})
+    elastic = _FakeBackend({"results": [{"id": "doc-x"}, {"id": "doc-1"}]})
+    telemetry = InMemoryTelemetrySink()
+    service = SearchGatewayService(
+        azure_backend=azure,
+        elastic_backend=elastic,
+        mode=TrafficMode.CANARY,
+        canary_percent=100,
+        auto_disable_canary_on_regression=True,
+        quality_gate=ShadowQualityGate(min_shadow_ndcg_at_10=0.85, max_ndcg_drop=0.10),
+        judgment_provider=_StaticJudgmentProvider(
+            QueryJudgment(query_id="q1", graded_relevance={"doc-1": 3.0, "doc-2": 2.0})
+        ),
+        telemetry_sink=telemetry,
+    )
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold", "query_id": "q1"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "doc-x"
+    assert service.canary_frozen is True
+    assert service.last_canary_freeze_event is not None
+    assert service.last_canary_freeze_event["event_type"] == "canary_auto_disabled"
+    assert telemetry.counters[
+        ("search.gateway.canary_auto_disabled", (("code", "shadow_relevance_regression"), ("entity_type", "customerDocument")))
+    ] == 1
+
+
+def test_canary_frozen_mode_routes_back_to_azure_primary() -> None:
+    azure = _FakeBackend({"results": [{"id": "azure-doc"}]})
+    elastic = _FakeBackend({"results": [{"id": "elastic-doc"}]})
+    service = SearchGatewayService(
+        azure_backend=azure,
+        elastic_backend=elastic,
+        mode=TrafficMode.CANARY,
+        canary_percent=100,
+    )
+    service.canary_frozen = True
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "azure-doc"

@@ -23,11 +23,11 @@
 
 - add replay and production DLQ handling
 - add reconciliation by entity cohort and tenant
-- back remote reconciliation with streamed digest APIs and deeper Merkle validation
+- wire remote reconciliation stores with streamed digest APIs and deeper Merkle validation
 - integrate the existing domain onboarding config loader into deployed services
 - add OpenTelemetry exporters and dashboards
 - add judged query corpus and offline relevance evaluation workflow
-- route quality-gate events into production alerting
+- route quality-gate events into production alerting and canary automation controls
 
 ## Phase 3
 
