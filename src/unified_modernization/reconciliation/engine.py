@@ -376,67 +376,71 @@ class BucketedReconciliationEngine:
         target_leaf_size: int = 128,
         page_size: int = 1000,
         fanout: int = 16,
+        parallel_fetch_workers: int = 2,
     ) -> ReconciliationReport:
-        source_buckets, target_buckets = self._fetch_bucket_digest_pair(
-            source_store,
-            target_store,
-            bucket_count=bucket_count,
-        )
-        source_snapshot = BucketedStoreSnapshot(
-            name="source",
-            bucket_count=bucket_count,
-            buckets=source_buckets,
-        )
-        target_snapshot = BucketedStoreSnapshot(
-            name="target",
-            bucket_count=bucket_count,
-            buckets=target_buckets,
-        )
-        findings: list[ReconciliationFinding] = []
-        mismatched_bucket_ids: list[str] = []
-
-        for bucket_id in sorted(set(source_snapshot.buckets).union(target_snapshot.buckets)):
-            source_bucket = source_snapshot.buckets.get(bucket_id)
-            target_bucket = target_snapshot.buckets.get(bucket_id)
-            if source_bucket is None or target_bucket is None:
-                findings.append(
-                    ReconciliationFinding(
-                        severity="critical",
-                        code="bucket_missing",
-                        message=f"bucket {bucket_id} missing from one side of reconciliation",
-                        affected_ids=[bucket_id],
-                        total_affected=1,
-                    )
-                )
-                mismatched_bucket_ids.append(bucket_id)
-                continue
-            if source_bucket != target_bucket:
-                findings.append(
-                    ReconciliationFinding(
-                        severity="critical",
-                        code="bucket_mismatch",
-                        message=f"bucket {bucket_id} hash or counts differ between source and target",
-                        affected_ids=[bucket_id],
-                        total_affected=1,
-                    )
-                )
-                mismatched_bucket_ids.append(bucket_id)
-
-        findings.extend(
-            self._drill_down_remote(
+        with ThreadPoolExecutor(max_workers=parallel_fetch_workers) as executor:
+            source_buckets, target_buckets = self._fetch_bucket_digest_pair(
                 source_store,
                 target_store,
-                source_snapshot,
-                target_snapshot,
-                bucket_ids=mismatched_bucket_ids,
-                depth=1,
-                max_recursive_depth=max_recursive_depth,
-                target_leaf_size=target_leaf_size,
-                page_size=page_size,
-                fanout=fanout,
+                bucket_count=bucket_count,
+                executor=executor,
             )
-        )
-        return ReconciliationReport(findings=findings)
+            source_snapshot = BucketedStoreSnapshot(
+                name="source",
+                bucket_count=bucket_count,
+                buckets=source_buckets,
+            )
+            target_snapshot = BucketedStoreSnapshot(
+                name="target",
+                bucket_count=bucket_count,
+                buckets=target_buckets,
+            )
+            findings: list[ReconciliationFinding] = []
+            mismatched_bucket_ids: list[str] = []
+
+            for bucket_id in sorted(set(source_snapshot.buckets).union(target_snapshot.buckets)):
+                source_bucket = source_snapshot.buckets.get(bucket_id)
+                target_bucket = target_snapshot.buckets.get(bucket_id)
+                if source_bucket is None or target_bucket is None:
+                    findings.append(
+                        ReconciliationFinding(
+                            severity="critical",
+                            code="bucket_missing",
+                            message=f"bucket {bucket_id} missing from one side of reconciliation",
+                            affected_ids=[bucket_id],
+                            total_affected=1,
+                        )
+                    )
+                    mismatched_bucket_ids.append(bucket_id)
+                    continue
+                if source_bucket != target_bucket:
+                    findings.append(
+                        ReconciliationFinding(
+                            severity="critical",
+                            code="bucket_mismatch",
+                            message=f"bucket {bucket_id} hash or counts differ between source and target",
+                            affected_ids=[bucket_id],
+                            total_affected=1,
+                        )
+                    )
+                    mismatched_bucket_ids.append(bucket_id)
+
+            findings.extend(
+                self._drill_down_remote(
+                    source_store,
+                    target_store,
+                    source_snapshot,
+                    target_snapshot,
+                    bucket_ids=mismatched_bucket_ids,
+                    depth=1,
+                    max_recursive_depth=max_recursive_depth,
+                    target_leaf_size=target_leaf_size,
+                    page_size=page_size,
+                    fanout=fanout,
+                    executor=executor,
+                )
+            )
+            return ReconciliationReport(findings=findings)
 
     def _drill_down(
         self,
@@ -515,6 +519,7 @@ class BucketedReconciliationEngine:
         target_leaf_size: int,
         page_size: int,
         fanout: int,
+        executor: ThreadPoolExecutor,
     ) -> list[ReconciliationFinding]:
         findings: list[ReconciliationFinding] = []
         work_queue: deque[tuple[str, int, dict[str, BucketDigest], dict[str, BucketDigest]]] = deque(
@@ -538,6 +543,7 @@ class BucketedReconciliationEngine:
                     target_store,
                     bucket_id=bucket_id,
                     page_size=page_size,
+                    executor=executor,
                 )
                 findings.extend(
                     self._compare_document_maps(
@@ -555,6 +561,7 @@ class BucketedReconciliationEngine:
                 parent_bucket_id=bucket_id,
                 depth=bucket_depth,
                 fanout=fanout,
+                executor=executor,
             )
             child_bucket_ids: list[str] = []
             for child_bucket_id in sorted(set(source_children).union(target_children)):
@@ -600,28 +607,28 @@ class BucketedReconciliationEngine:
         target_store: RemoteBucketStore,
         *,
         bucket_count: int,
+        executor: ThreadPoolExecutor,
         parent_bucket_id: str | None = None,
         depth: int = 0,
         fanout: int = 16,
     ) -> tuple[dict[str, BucketDigest], dict[str, BucketDigest]]:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            source_future = executor.submit(
-                lambda: source_store.fetch_bucket_digests(
-                    bucket_count=bucket_count,
-                    parent_bucket_id=parent_bucket_id,
-                    depth=depth,
-                    fanout=fanout,
-                )
-            )
-            target_future = executor.submit(
-                lambda: target_store.fetch_bucket_digests(
-                    bucket_count=bucket_count,
-                    parent_bucket_id=parent_bucket_id,
-                    depth=depth,
-                    fanout=fanout,
-                )
-            )
-            return source_future.result(), target_future.result()
+        source_future = executor.submit(
+            self._fetch_remote_bucket_digests,
+            source_store,
+            bucket_count=bucket_count,
+            parent_bucket_id=parent_bucket_id,
+            depth=depth,
+            fanout=fanout,
+        )
+        target_future = executor.submit(
+            self._fetch_remote_bucket_digests,
+            target_store,
+            bucket_count=bucket_count,
+            parent_bucket_id=parent_bucket_id,
+            depth=depth,
+            fanout=fanout,
+        )
+        return source_future.result(), target_future.result()
 
     def _fetch_bucket_document_pair(
         self,
@@ -630,23 +637,37 @@ class BucketedReconciliationEngine:
         *,
         bucket_id: str,
         page_size: int,
+        executor: ThreadPoolExecutor,
     ) -> tuple[dict[str, DocumentFingerprint], dict[str, DocumentFingerprint]]:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            source_future = executor.submit(
-                lambda: self._fetch_bucket_documents_remote(
-                    source_store,
-                    bucket_id,
-                    page_size=page_size,
-                )
-            )
-            target_future = executor.submit(
-                lambda: self._fetch_bucket_documents_remote(
-                    target_store,
-                    bucket_id,
-                    page_size=page_size,
-                )
-            )
-            return source_future.result(), target_future.result()
+        source_future = executor.submit(
+            self._fetch_bucket_documents_remote,
+            source_store,
+            bucket_id,
+            page_size=page_size,
+        )
+        target_future = executor.submit(
+            self._fetch_bucket_documents_remote,
+            target_store,
+            bucket_id,
+            page_size=page_size,
+        )
+        return source_future.result(), target_future.result()
+
+    @staticmethod
+    def _fetch_remote_bucket_digests(
+        store: RemoteBucketStore,
+        *,
+        bucket_count: int,
+        parent_bucket_id: str | None,
+        depth: int,
+        fanout: int,
+    ) -> dict[str, BucketDigest]:
+        return store.fetch_bucket_digests(
+            bucket_count=bucket_count,
+            parent_bucket_id=parent_bucket_id,
+            depth=depth,
+            fanout=fanout,
+        )
 
     def _compare_document_maps(
         self,

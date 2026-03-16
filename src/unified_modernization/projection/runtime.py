@@ -98,74 +98,20 @@ class ProjectionRuntime:
     ) -> ProjectionRuntimeResult:
         pending_documents = self._projection_builder.pending_count()
         pressure = self._backpressure_controller.evaluate(pending_documents)
-        if not pressure.accepted:
-            bypass_reason = self._backpressure_bypass_reason(event)
-            if bypass_reason is not None:
-                self._telemetry_sink.increment(
-                    "projection.backpressure.bypassed",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type, "reason": bypass_reason},
-                )
-            else:
-                self._telemetry_sink.increment(
-                    "projection.backpressure.rejected",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-                )
-                self._telemetry_sink.emit(
-                    TelemetryEvent(
-                        event_type="projection_backpressure",
-                        severity="warning",
-                        trace_id=event.trace_id,
-                        attributes={
-                            "tenant_id": event.tenant_id,
-                            "logical_entity_id": event.logical_entity_id,
-                            "pending_documents": pending_documents,
-                            "reason_code": pressure.reason_code,
-                        },
-                    )
-                )
-                return ProjectionRuntimeResult(
-                    accepted=False,
-                    throttled=True,
-                    reason_code=pressure.reason_code,
-                )
+        backpressure_result = self._handle_backpressure(
+            event,
+            pending_documents=pending_documents,
+            pressure=pressure,
+            bypass_reason=None if pressure.accepted else self._backpressure_bypass_reason(event),
+        )
+        if backpressure_result is not None:
+            return backpressure_result
 
         try:
             decision = self._projection_builder.upsert(event, now_utc=now_utc)
         except Exception as exc:  # pragma: no cover - exercised through tests
             self._quarantine_failed_entity(event, exc, now_utc=now_utc)
-            record = DeadLetterRecord(
-                event_id=event.event_id,
-                tenant_id=event.tenant_id,
-                domain_name=event.domain_name,
-                entity_type=event.entity_type,
-                logical_entity_id=event.logical_entity_id,
-                trace_id=event.trace_id,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                payload=event.model_dump(mode="json"),
-            )
-            self._dead_letter_queue.publish(record)
-            self._telemetry_sink.increment(
-                "projection.failed",
-                tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-            )
-            self._telemetry_sink.emit(
-                TelemetryEvent(
-                    event_type="projection_failed",
-                    severity="error",
-                    trace_id=event.trace_id,
-                    attributes={
-                        "tenant_id": event.tenant_id,
-                        "logical_entity_id": event.logical_entity_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-            )
-            return ProjectionRuntimeResult(
-                accepted=False,
-                dead_lettered=True,
-                reason_code="projection_failed",
-            )
+            return self._projection_failure_result(event, exc)
 
         publish_result: dict[str, object] | None = None
         if decision.publish and decision.document is not None and self._document_publisher is not None:
@@ -175,55 +121,9 @@ class ProjectionRuntime:
                     trace_id=event.trace_id,
                 )
             except Exception as exc:  # pragma: no cover - exercised through tests
-                record = DeadLetterRecord(
-                    event_id=event.event_id,
-                    tenant_id=event.tenant_id,
-                    domain_name=event.domain_name,
-                    entity_type=event.entity_type,
-                    logical_entity_id=event.logical_entity_id,
-                    trace_id=event.trace_id,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    payload={
-                        "event": event.model_dump(mode="json"),
-                        "document": decision.document.model_dump(mode="json"),
-                    },
-                )
-                self._dead_letter_queue.publish(record)
-                self._telemetry_sink.increment(
-                    "projection.publish_failed",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-                )
-                self._telemetry_sink.emit(
-                    TelemetryEvent(
-                        event_type="projection_publish_failed",
-                        severity="error",
-                        trace_id=event.trace_id,
-                        attributes={
-                            "tenant_id": event.tenant_id,
-                            "logical_entity_id": event.logical_entity_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                )
-                return ProjectionRuntimeResult(
-                    accepted=False,
-                    decision=decision,
-                    dead_lettered=True,
-                    reason_code="publish_failed",
-                )
+                return self._publish_failure_result(event, decision, exc)
 
-        metric_name = "projection.published" if decision.publish else "projection.pending"
-        self._telemetry_sink.increment(
-            metric_name,
-            tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-        )
-        return ProjectionRuntimeResult(
-            accepted=True,
-            decision=decision,
-            publish_result=publish_result,
-            reason_code="processed",
-        )
+        return self._processed_result(event, decision, publish_result)
 
     async def process_async(
         self,
@@ -231,44 +131,84 @@ class ProjectionRuntime:
         *,
         now_utc: datetime | None = None,
     ) -> ProjectionRuntimeResult:
-        pending_documents = self._projection_builder.pending_count()
+        pending_documents = await asyncio.to_thread(self._projection_builder.pending_count)
         pressure = self._backpressure_controller.evaluate(pending_documents)
+        bypass_reason = None
         if not pressure.accepted:
-            bypass_reason = self._backpressure_bypass_reason(event)
-            if bypass_reason is not None:
-                self._telemetry_sink.increment(
-                    "projection.backpressure.bypassed",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type, "reason": bypass_reason},
-                )
-            else:
-                self._telemetry_sink.increment(
-                    "projection.backpressure.rejected",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-                )
-                self._telemetry_sink.emit(
-                    TelemetryEvent(
-                        event_type="projection_backpressure",
-                        severity="warning",
-                        trace_id=event.trace_id,
-                        attributes={
-                            "tenant_id": event.tenant_id,
-                            "logical_entity_id": event.logical_entity_id,
-                            "pending_documents": pending_documents,
-                            "reason_code": pressure.reason_code,
-                        },
-                    )
-                )
-                return ProjectionRuntimeResult(
-                    accepted=False,
-                    throttled=True,
-                    reason_code=pressure.reason_code,
-                )
+            bypass_reason = await self._backpressure_bypass_reason_async(event)
+        backpressure_result = self._handle_backpressure(
+            event,
+            pending_documents=pending_documents,
+            pressure=pressure,
+            bypass_reason=bypass_reason,
+        )
+        if backpressure_result is not None:
+            return backpressure_result
 
         try:
-            decision = self._projection_builder.upsert(event, now_utc=now_utc)
+            decision = await asyncio.to_thread(self._projection_builder.upsert, event, now_utc=now_utc)
         except Exception as exc:  # pragma: no cover - exercised through tests
-            self._quarantine_failed_entity(event, exc, now_utc=now_utc)
-            record = DeadLetterRecord(
+            await self._quarantine_failed_entity_async(event, exc, now_utc=now_utc)
+            return self._projection_failure_result(event, exc)
+
+        publish_result: dict[str, object] | None = None
+        if decision.publish and decision.document is not None and self._document_publisher is not None:
+            try:
+                publish_result = await self._publish_document_async(
+                    decision.document,
+                    trace_id=event.trace_id,
+                )
+            except Exception as exc:  # pragma: no cover - exercised through tests
+                return self._publish_failure_result(event, decision, exc)
+
+        return self._processed_result(event, decision, publish_result)
+
+    def _handle_backpressure(
+        self,
+        event: CanonicalDomainEvent,
+        *,
+        pending_documents: int,
+        pressure: BackpressureDecision,
+        bypass_reason: str | None,
+    ) -> ProjectionRuntimeResult | None:
+        if pressure.accepted:
+            return None
+        if bypass_reason is not None:
+            self._telemetry_sink.increment(
+                "projection.backpressure.bypassed",
+                tags={"domain_name": event.domain_name, "entity_type": event.entity_type, "reason": bypass_reason},
+            )
+            return None
+        self._telemetry_sink.increment(
+            "projection.backpressure.rejected",
+            tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="projection_backpressure",
+                severity="warning",
+                trace_id=event.trace_id,
+                attributes={
+                    "tenant_id": event.tenant_id,
+                    "logical_entity_id": event.logical_entity_id,
+                    "pending_documents": pending_documents,
+                    "reason_code": pressure.reason_code,
+                },
+            )
+        )
+        return ProjectionRuntimeResult(
+            accepted=False,
+            throttled=True,
+            reason_code=pressure.reason_code,
+        )
+
+    def _projection_failure_result(
+        self,
+        event: CanonicalDomainEvent,
+        exc: Exception,
+    ) -> ProjectionRuntimeResult:
+        self._dead_letter_queue.publish(
+            DeadLetterRecord(
                 event_id=event.event_id,
                 tenant_id=event.tenant_id,
                 domain_name=event.domain_name,
@@ -279,75 +219,83 @@ class ProjectionRuntime:
                 error_message=str(exc),
                 payload=event.model_dump(mode="json"),
             )
-            self._dead_letter_queue.publish(record)
-            self._telemetry_sink.increment(
-                "projection.failed",
-                tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+        )
+        self._telemetry_sink.increment(
+            "projection.failed",
+            tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="projection_failed",
+                severity="error",
+                trace_id=event.trace_id,
+                attributes={
+                    "tenant_id": event.tenant_id,
+                    "logical_entity_id": event.logical_entity_id,
+                    "error_type": type(exc).__name__,
+                },
             )
-            self._telemetry_sink.emit(
-                TelemetryEvent(
-                    event_type="projection_failed",
-                    severity="error",
-                    trace_id=event.trace_id,
-                    attributes={
-                        "tenant_id": event.tenant_id,
-                        "logical_entity_id": event.logical_entity_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-            )
-            return ProjectionRuntimeResult(
-                accepted=False,
-                dead_lettered=True,
-                reason_code="projection_failed",
-            )
+        )
+        return ProjectionRuntimeResult(
+            accepted=False,
+            dead_lettered=True,
+            reason_code="projection_failed",
+        )
 
-        publish_result: dict[str, object] | None = None
-        if decision.publish and decision.document is not None and self._document_publisher is not None:
-            try:
-                publish_result = await self._publish_document_async(
-                    decision.document,
-                    trace_id=event.trace_id,
-                )
-            except Exception as exc:  # pragma: no cover - exercised through tests
-                record = DeadLetterRecord(
-                    event_id=event.event_id,
-                    tenant_id=event.tenant_id,
-                    domain_name=event.domain_name,
-                    entity_type=event.entity_type,
-                    logical_entity_id=event.logical_entity_id,
-                    trace_id=event.trace_id,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    payload={
-                        "event": event.model_dump(mode="json"),
-                        "document": decision.document.model_dump(mode="json"),
-                    },
-                )
-                self._dead_letter_queue.publish(record)
-                self._telemetry_sink.increment(
-                    "projection.publish_failed",
-                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
-                )
-                self._telemetry_sink.emit(
-                    TelemetryEvent(
-                        event_type="projection_publish_failed",
-                        severity="error",
-                        trace_id=event.trace_id,
-                        attributes={
-                            "tenant_id": event.tenant_id,
-                            "logical_entity_id": event.logical_entity_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                )
-                return ProjectionRuntimeResult(
-                    accepted=False,
-                    decision=decision,
-                    dead_lettered=True,
-                    reason_code="publish_failed",
-                )
+    def _publish_failure_result(
+        self,
+        event: CanonicalDomainEvent,
+        decision: PublicationDecision,
+        exc: Exception,
+    ) -> ProjectionRuntimeResult:
+        document = decision.document
+        if document is None:
+            raise ValueError("publish failure requires a document")
+        self._dead_letter_queue.publish(
+            DeadLetterRecord(
+                event_id=event.event_id,
+                tenant_id=event.tenant_id,
+                domain_name=event.domain_name,
+                entity_type=event.entity_type,
+                logical_entity_id=event.logical_entity_id,
+                trace_id=event.trace_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                payload={
+                    "event": event.model_dump(mode="json"),
+                    "document": document.model_dump(mode="json"),
+                },
+            )
+        )
+        self._telemetry_sink.increment(
+            "projection.publish_failed",
+            tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="projection_publish_failed",
+                severity="error",
+                trace_id=event.trace_id,
+                attributes={
+                    "tenant_id": event.tenant_id,
+                    "logical_entity_id": event.logical_entity_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        )
+        return ProjectionRuntimeResult(
+            accepted=False,
+            decision=decision,
+            dead_lettered=True,
+            reason_code="publish_failed",
+        )
 
+    def _processed_result(
+        self,
+        event: CanonicalDomainEvent,
+        decision: PublicationDecision,
+        publish_result: dict[str, object] | None,
+    ) -> ProjectionRuntimeResult:
         metric_name = "projection.published" if decision.publish else "projection.pending"
         self._telemetry_sink.increment(
             metric_name,
@@ -361,17 +309,39 @@ class ProjectionRuntime:
         )
 
     def _backpressure_bypass_reason(self, event: CanonicalDomainEvent) -> str | None:
+        return self._backpressure_bypass_reason_from_state(
+            event,
+            self._projection_builder.get_state(
+                event.tenant_id,
+                event.domain_name,
+                event.entity_type,
+                event.logical_entity_id,
+            ),
+        )
+
+    async def _backpressure_bypass_reason_async(self, event: CanonicalDomainEvent) -> str | None:
         if event.change_type in {ChangeType.REPAIR, ChangeType.REFRESH}:
             return "priority_change_type"
-        state = self._projection_builder.get_state(
+        state = await asyncio.to_thread(
+            self._projection_builder.get_state,
             event.tenant_id,
             event.domain_name,
             event.entity_type,
             event.logical_entity_id,
         )
+        return self._backpressure_bypass_reason_from_state(event, state)
+
+    @staticmethod
+    def _backpressure_bypass_reason_from_state(
+        event: CanonicalDomainEvent,
+        state: ProjectionStatus | Any | None,
+    ) -> str | None:
+        if event.change_type in {ChangeType.REPAIR, ChangeType.REFRESH}:
+            return "priority_change_type"
         if state is None:
             return None
-        if state.status in {
+        state_status = getattr(state, "status", None)
+        if state_status in {
             ProjectionStatus.PENDING_REQUIRED_FRAGMENT,
             ProjectionStatus.PENDING_REHYDRATION,
             ProjectionStatus.STALE,
@@ -404,12 +374,34 @@ class ProjectionRuntime:
         *,
         now_utc: datetime | None,
     ) -> None:
-        quarantine = getattr(self._projection_builder, "quarantine", None)
-        if not callable(quarantine):
-            return
         reason = f"{type(exc).__name__}: {exc}"
         try:
-            quarantine(
+            self._projection_builder.quarantine(
+                event.tenant_id,
+                event.domain_name,
+                event.entity_type,
+                event.logical_entity_id,
+                reason=reason,
+                now_utc=now_utc,
+                trace_id=event.trace_id,
+            )
+        except Exception:
+            self._telemetry_sink.increment(
+                "projection.quarantine_failed",
+                tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+            )
+
+    async def _quarantine_failed_entity_async(
+        self,
+        event: CanonicalDomainEvent,
+        exc: Exception,
+        *,
+        now_utc: datetime | None,
+    ) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        try:
+            await asyncio.to_thread(
+                self._projection_builder.quarantine,
                 event.tenant_id,
                 event.domain_name,
                 event.entity_type,

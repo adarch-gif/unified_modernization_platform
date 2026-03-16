@@ -59,6 +59,19 @@ def test_projection_runtime_dead_letters_failed_mutation() -> None:
             del event, now_utc
             raise RuntimeError("boom")
 
+        def quarantine(
+            self,
+            tenant_id: str,
+            domain_name: str,
+            entity_type: str,
+            logical_entity_id: str,
+            *,
+            reason: str,
+            now_utc: datetime | None = None,
+            trace_id: str | None = None,
+        ) -> None:
+            del tenant_id, domain_name, entity_type, logical_entity_id, reason, now_utc, trace_id
+
     dead_letter_queue = InMemoryDeadLetterQueue()
     runtime = ProjectionRuntime(
         _FailingBuilder(),  # type: ignore[arg-type]
@@ -265,3 +278,99 @@ def test_projection_runtime_process_async_uses_async_publisher() -> None:
 
     assert result.accepted is True
     assert result.publish_result == {"result": "created"}
+
+
+def test_projection_runtime_process_async_moves_store_calls_off_event_loop() -> None:
+    class _ThreadAwareBuilder:
+        def __init__(self) -> None:
+            self.pending_count_off_loop = False
+            self.upsert_off_loop = False
+
+        def pending_count(self) -> int:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                self.pending_count_off_loop = True
+                return 0
+            raise AssertionError("pending_count should not run on the event loop thread")
+
+        def upsert(self, event: CanonicalDomainEvent, now_utc: datetime | None = None):
+            del event, now_utc
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                self.upsert_off_loop = True
+            else:
+                raise AssertionError("upsert should not run on the event loop thread")
+
+            builder = ProjectionBuilder(
+                [
+                    DependencyPolicy(
+                        entity_type="customerDocument",
+                        rules=[DependencyRule(owner="document_core", required=True)],
+                    )
+                ],
+                state_store=InMemoryProjectionStateStore(),
+            )
+            return builder.upsert(
+                CanonicalDomainEvent(
+                    domain_name="customer_documents",
+                    entity_type="customerDocument",
+                    logical_entity_id="doc-thread-offload",
+                    tenant_id="tenant-a",
+                    source_technology=SourceTechnology.COSMOS,
+                    source_version=1,
+                    fragment_owner="document_core",
+                    payload={"title": "Thread offload"},
+                    event_time_utc=datetime.now(UTC),
+                )
+            )
+
+        def get_state(
+            self,
+            tenant_id: str,
+            domain_name: str,
+            entity_type: str,
+            logical_entity_id: str,
+        ):
+            del tenant_id, domain_name, entity_type, logical_entity_id
+            return None
+
+        def quarantine(
+            self,
+            tenant_id: str,
+            domain_name: str,
+            entity_type: str,
+            logical_entity_id: str,
+            *,
+            reason: str,
+            now_utc: datetime | None = None,
+            trace_id: str | None = None,
+        ) -> None:
+            del tenant_id, domain_name, entity_type, logical_entity_id, reason, now_utc, trace_id
+
+    builder = _ThreadAwareBuilder()
+    runtime = ProjectionRuntime(
+        builder,  # type: ignore[arg-type]
+        telemetry_sink=InMemoryTelemetrySink(),
+    )
+
+    result = asyncio.run(
+        runtime.process_async(
+            CanonicalDomainEvent(
+                domain_name="customer_documents",
+                entity_type="customerDocument",
+                logical_entity_id="doc-async-offload",
+                tenant_id="tenant-a",
+                source_technology=SourceTechnology.COSMOS,
+                source_version=1,
+                fragment_owner="document_core",
+                payload={"title": "Async offload"},
+                event_time_utc=datetime.now(UTC),
+            )
+        )
+    )
+
+    assert result.accepted is True
+    assert builder.pending_count_off_loop is True
+    assert builder.upsert_off_loop is True
