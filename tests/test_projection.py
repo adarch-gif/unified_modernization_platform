@@ -3,8 +3,11 @@ from pathlib import Path
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from unified_modernization.contracts.events import CanonicalDomainEvent, SourceTechnology
 from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionKey, ProjectionStatus
+from unified_modernization.projection.bootstrap import build_projection_builder
 from unified_modernization.projection.builder import ProjectionBuilder
 from unified_modernization.projection.store import (
     SpannerProjectionStateStore,
@@ -313,3 +316,16 @@ def test_spanner_store_ignores_older_fragment_versions() -> None:
     )
 
     assert fragments["document_core"].payload["title"] == "Newer"
+
+
+def test_projection_builder_rejects_in_memory_state_in_prod() -> None:
+    with pytest.raises(ValueError):
+        build_projection_builder(
+            policies=[
+                DependencyPolicy(
+                    entity_type="customerDocument",
+                    rules=[DependencyRule(owner="document_core", required=True)],
+                )
+            ],
+            environment="prod",
+        )

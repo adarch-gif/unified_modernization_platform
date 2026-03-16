@@ -39,6 +39,12 @@ The builder now depends on a `ProjectionStateStore` contract. The repo includes:
 
 The production path is to implement the same contract on Spanner or an equivalently durable control-plane store.
 
+The runtime bootstrap now makes this a deployment invariant:
+
+- local/dev/test may use the in-memory store
+- staging/production must provide an explicit durable store
+- the helper in `projection/bootstrap.py` exists so service startup cannot silently default to in-memory state
+
 ### Backfill coordinator
 
 Historical migration must not overload the real-time event path. The backfill coordinator therefore models:
@@ -58,6 +64,12 @@ The gateway preserves a stable client-facing contract and supports:
 - Elastic-only mode
 
 The gateway is tenant-routed. Queries resolve through the tenant policy engine into shared or dedicated Elasticsearch aliases before being sent to the target backend.
+
+The gateway also now supports:
+
+- operational shadow quality gates
+- telemetry-ready events when ranking quality falls below threshold
+- resilient backend wrappers for timeout, retry, and circuit-breaker behavior
 
 ### Search evaluation
 

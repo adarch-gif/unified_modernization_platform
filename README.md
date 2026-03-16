@@ -17,6 +17,8 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Tenant routing policy engine and alias-routing model
 - Search Gateway service and OData to Elasticsearch translator
 - Search evaluation harness with live overlap and offline judged relevance metrics
+- Operational shadow quality gate with telemetry-ready events
+- Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
 - Backfill coordinator with side-load to stream-handoff planning
 - Firestore outbox normalization model
 - Reconciliation engine with tenant, cohort, and delete-aware validation
@@ -119,10 +121,14 @@ But:
   Bulk side-load and stream handoff planner so historical backfill does not depend on the real-time bus
 - `gateway/evaluation.py`
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
+- `gateway/resilience.py`
+  Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
 - `reconciliation/engine.py`
   Snapshot reconciliation plus bucketed anti-entropy and bucket-level drill-down
 - `routing/tenant_policy.py`
   Shared-index versus dedicated-index alias routing policy
+- `projection/bootstrap.py`
+  Runtime bootstrap helper that forbids in-memory projection state outside local/dev/test
 
 ## Immediate next steps
 
@@ -130,7 +136,7 @@ But:
 2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
 3. Extend bucketed reconciliation into a multi-level Merkle-style validation workflow for billion-document domains.
 4. Add end-to-end replay, DLQ handling, and rehydration workers for pending projections.
-5. Add live Azure Search and Elasticsearch query clients behind the gateway with circuit breakers and telemetry.
+5. Add live Azure Search and Elasticsearch query clients behind the gateway, then wire the resilient backend wrapper into production startup and telemetry pipelines.
 
 ## Status
 

@@ -4,13 +4,32 @@ import hashlib
 from enum import StrEnum
 from typing import Any, Protocol
 
-from unified_modernization.gateway.evaluation import SearchEvaluationHarness
+from unified_modernization.gateway.evaluation import (
+    QueryJudgment,
+    SearchEvaluationHarness,
+    ShadowQualityDecision,
+    ShadowQualityGate,
+)
 from unified_modernization.gateway.odata import ODataTranslator
+from unified_modernization.gateway.resilience import NoopTelemetrySink, TelemetrySink
 from unified_modernization.routing.tenant_policy import TenantPolicyEngine
 
 
 class SearchBackend(Protocol):
     async def query(self, request: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class QueryJudgmentProvider(Protocol):
+    def get_judgment(
+        self,
+        *,
+        tenant_id: str,
+        entity_type: str,
+        raw_params: dict[str, str],
+        primary: dict[str, Any],
+        shadow: dict[str, Any],
+    ) -> QueryJudgment | None:
         raise NotImplementedError
 
 
@@ -29,6 +48,9 @@ class SearchGatewayService:
         translator: ODataTranslator | None = None,
         tenant_policy_engine: TenantPolicyEngine | None = None,
         evaluator: SearchEvaluationHarness | None = None,
+        quality_gate: ShadowQualityGate | None = None,
+        judgment_provider: QueryJudgmentProvider | None = None,
+        telemetry_sink: TelemetrySink | None = None,
         mode: TrafficMode = TrafficMode.AZURE_ONLY,
         canary_percent: int = 0,
     ) -> None:
@@ -37,9 +59,13 @@ class SearchGatewayService:
         self._translator = translator or ODataTranslator()
         self._tenant_policy_engine = tenant_policy_engine or TenantPolicyEngine()
         self._evaluator = evaluator or SearchEvaluationHarness()
+        self._quality_gate = quality_gate or ShadowQualityGate()
+        self._judgment_provider = judgment_provider
+        self._telemetry_sink = telemetry_sink or NoopTelemetrySink()
         self._mode = mode
         self._canary_percent = canary_percent
         self.last_shadow_comparison: dict[str, Any] | None = None
+        self.last_shadow_quality_gate: dict[str, Any] | None = None
 
     async def search(
         self,
@@ -62,6 +88,14 @@ class SearchGatewayService:
             primary = await self._azure.query(azure_request)
             shadow = await self._elastic.query(elastic_request)
             self.last_shadow_comparison = self._compare(primary, shadow)
+            self.last_shadow_quality_gate = self._evaluate_shadow_quality(
+                tenant_id=tenant_id,
+                entity_type=entity_type,
+                raw_params=raw_params,
+                primary=primary,
+                shadow=shadow,
+                live_comparison=self.last_shadow_comparison,
+            )
             return primary
         if self._bucket(f"{tenant_id}:{consumer_id}") < self._canary_percent:
             return await self._elastic.query(elastic_request)
@@ -82,3 +116,61 @@ class SearchGatewayService:
 
     def _compare(self, primary: dict[str, Any], shadow: dict[str, Any]) -> dict[str, Any]:
         return self._evaluator.compare_live(primary, shadow)
+
+    def _evaluate_shadow_quality(
+        self,
+        *,
+        tenant_id: str,
+        entity_type: str,
+        raw_params: dict[str, str],
+        primary: dict[str, Any],
+        shadow: dict[str, Any],
+        live_comparison: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        query_id = raw_params.get("query_id")
+        judgment = None
+        if self._judgment_provider is not None:
+            judgment = self._judgment_provider.get_judgment(
+                tenant_id=tenant_id,
+                entity_type=entity_type,
+                raw_params=raw_params,
+                primary=primary,
+                shadow=shadow,
+            )
+
+        primary_metrics = None
+        shadow_metrics = None
+        if judgment is not None:
+            effective_query_id = query_id or judgment.query_id
+            primary_metrics = self._evaluator.evaluate_response(
+                query_id=effective_query_id,
+                response=primary,
+                judgment=judgment,
+            )
+            shadow_metrics = self._evaluator.evaluate_response(
+                query_id=effective_query_id,
+                response=shadow,
+                judgment=judgment,
+            )
+            query_id = effective_query_id
+
+        decision = self._quality_gate.evaluate(
+            live_comparison=live_comparison,
+            query_id=query_id,
+            primary_metrics=primary_metrics,
+            shadow_metrics=shadow_metrics,
+        )
+        payload = self._decision_payload(decision)
+        if decision.event is not None:
+            self._telemetry_sink.emit(payload)
+        return payload
+
+    @staticmethod
+    def _decision_payload(decision: ShadowQualityDecision) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "live_comparison": decision.live_comparison,
+            "judged_metrics": decision.judged_metrics,
+        }
+        if decision.event is not None:
+            payload["event"] = decision.event.model_dump()
+        return payload

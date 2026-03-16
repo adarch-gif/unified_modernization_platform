@@ -19,6 +19,9 @@ from unified_modernization.contracts.projection import (
 from unified_modernization.projection.store import InMemoryProjectionStateStore, ProjectionStateStore
 
 
+_NON_PRODUCTION_ENVIRONMENTS = {"local", "dev", "test"}
+
+
 class ProjectionBuilder:
     """Projection completeness and publication logic backed by a pluggable state store."""
 
@@ -26,9 +29,17 @@ class ProjectionBuilder:
         self,
         policies: list[DependencyPolicy],
         state_store: ProjectionStateStore | None = None,
+        environment: str = "dev",
     ) -> None:
         self._policies = {policy.entity_type: policy for policy in policies}
-        self._state_store = state_store or InMemoryProjectionStateStore()
+        self._environment = environment.lower()
+        resolved_state_store = state_store or InMemoryProjectionStateStore()
+        if self._environment not in _NON_PRODUCTION_ENVIRONMENTS and isinstance(
+            resolved_state_store,
+            InMemoryProjectionStateStore,
+        ):
+            raise ValueError("in-memory projection state is not allowed outside local/dev/test environments")
+        self._state_store = resolved_state_store
 
     @staticmethod
     def _projection_key(event: CanonicalDomainEvent) -> ProjectionKey:

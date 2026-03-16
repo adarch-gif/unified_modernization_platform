@@ -15,6 +15,7 @@
 - implement real Elasticsearch write client
 - implement gateway clients for Azure Search and Elasticsearch
 - wire tenant alias routing into live gateway clients
+- wire resilient backend wrappers and telemetry sinks into live gateway startup
 - implement batch side-load path and source-watermark capture for backfill
 
 ## Phase 2
@@ -25,6 +26,7 @@
 - add domain onboarding config loader
 - add metrics and tracing
 - add judged query corpus and offline relevance evaluation workflow
+- route quality-gate events into production alerting
 
 ## Phase 3
 

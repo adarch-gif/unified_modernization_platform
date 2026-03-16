@@ -1,7 +1,15 @@
 import asyncio
 
-from unified_modernization.gateway.evaluation import QueryEvaluationCase, QueryJudgment, SearchEvaluationHarness
+import pytest
+
+from unified_modernization.gateway.evaluation import (
+    QueryEvaluationCase,
+    QueryJudgment,
+    SearchEvaluationHarness,
+    ShadowQualityGate,
+)
 from unified_modernization.gateway.odata import ODataTranslator
+from unified_modernization.gateway.resilience import CircuitOpenError, ResilientSearchBackend
 from unified_modernization.gateway.service import SearchGatewayService, TrafficMode
 from unified_modernization.routing.tenant_policy import TenantPolicyEngine
 
@@ -42,6 +50,46 @@ class _FakeBackend:
     async def query(self, request: dict) -> dict:
         self.last_request = request
         return self.response
+
+
+class _FlakyBackend:
+    def __init__(self, responses: list[dict] | None = None, failures: int = 0) -> None:
+        self._responses = responses or [{"results": [{"id": "ok"}]}]
+        self._failures = failures
+        self.calls = 0
+
+    async def query(self, request: dict) -> dict:
+        del request
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise TimeoutError("backend timeout")
+        index = min(self.calls - self._failures - 1, len(self._responses) - 1)
+        return self._responses[index]
+
+
+class _CapturingTelemetrySink:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def emit(self, event: dict) -> None:
+        self.events.append(event)
+
+
+class _StaticJudgmentProvider:
+    def __init__(self, judgment: QueryJudgment) -> None:
+        self._judgment = judgment
+
+    def get_judgment(
+        self,
+        *,
+        tenant_id: str,
+        entity_type: str,
+        raw_params: dict[str, str],
+        primary: dict,
+        shadow: dict,
+    ) -> QueryJudgment | None:
+        del tenant_id, entity_type, raw_params, primary, shadow
+        return self._judgment
 
 
 def test_gateway_routes_tenant_to_read_alias() -> None:
@@ -105,3 +153,68 @@ def test_evaluation_harness_calculates_ndcg_and_mrr() -> None:
     assert report.query_count == 1
     assert report.average_ndcg_at_10 > 0.7
     assert report.average_mrr == 1.0
+
+
+def test_shadow_quality_gate_emits_relevance_regression_event() -> None:
+    azure = _FakeBackend({"results": [{"id": "doc-1"}, {"id": "doc-2"}]})
+    elastic = _FakeBackend({"results": [{"id": "doc-x"}, {"id": "doc-1"}]})
+    telemetry = _CapturingTelemetrySink()
+    service = SearchGatewayService(
+        azure_backend=azure,
+        elastic_backend=elastic,
+        mode=TrafficMode.SHADOW,
+        quality_gate=ShadowQualityGate(min_shadow_ndcg_at_10=0.85, max_ndcg_drop=0.10),
+        judgment_provider=_StaticJudgmentProvider(
+            QueryJudgment(query_id="q1", graded_relevance={"doc-1": 3.0, "doc-2": 2.0})
+        ),
+        telemetry_sink=telemetry,
+    )
+
+    asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold", "query_id": "q1"},
+        )
+    )
+
+    assert service.last_shadow_quality_gate is not None
+    assert service.last_shadow_quality_gate["event"]["code"] == "shadow_relevance_regression"
+    assert telemetry.events[0]["event"]["code"] == "shadow_relevance_regression"
+
+
+def test_resilient_backend_retries_and_recovers() -> None:
+    wrapped = ResilientSearchBackend(
+        _FlakyBackend(failures=1),
+        name="elastic",
+        timeout_seconds=0.1,
+        max_retries=1,
+        failure_threshold=3,
+    )
+
+    response = asyncio.run(wrapped.query({"query": {"match_all": {}}}))
+
+    assert response["results"][0]["id"] == "ok"
+    assert wrapped.state == "closed"
+
+
+def test_resilient_backend_opens_circuit_after_threshold() -> None:
+    telemetry = _CapturingTelemetrySink()
+    wrapped = ResilientSearchBackend(
+        _FlakyBackend(failures=10),
+        name="azure",
+        timeout_seconds=0.1,
+        max_retries=0,
+        failure_threshold=1,
+        recovery_timeout_seconds=60.0,
+        telemetry_sink=telemetry,
+    )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(wrapped.query({"params": {}}))
+    with pytest.raises(CircuitOpenError):
+        asyncio.run(wrapped.query({"params": {}}))
+
+    assert wrapped.state == "open"
+    assert any(event["event_type"] == "circuit_open" for event in telemetry.events)
