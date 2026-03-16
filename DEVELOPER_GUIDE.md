@@ -61,6 +61,88 @@ The platform achieves this through five capabilities:
 
 ## 2. High-Level Architecture
 
+### Mermaid Overview
+
+The Mermaid diagram below is the preferred visual reference for the current codebase. The ASCII diagram that follows is kept as a plain-text fallback for renderers that do not support Mermaid.
+
+```mermaid
+flowchart LR
+    subgraph Sources["Change Sources"]
+        AzureSQL["Azure SQL / Debezium"]
+        Cosmos["Cosmos Change Feed"]
+        SpannerCS["Spanner Change Stream"]
+        FirestoreOutbox["Firestore Outbox"]
+    end
+
+    subgraph Adapters["Adapters"]
+        DebeziumAdapter["DebeziumChangeEventAdapter"]
+        CosmosAdapter["CosmosChangeFeedAdapter"]
+        SpannerAdapter["SpannerChangeStreamAdapter"]
+        OutboxAdapter["normalize_outbox_record()"]
+    end
+
+    AzureSQL --> DebeziumAdapter
+    Cosmos --> CosmosAdapter
+    SpannerCS --> SpannerAdapter
+    FirestoreOutbox --> OutboxAdapter
+
+    subgraph Projection["Projection Pipeline"]
+        Runtime["ProjectionRuntime"]
+        Backpressure["BackpressureController"]
+        Builder["ProjectionBuilder"]
+        Store["ProjectionStateStore\nInMemory | SQLite | Spanner"]
+        Publisher["ElasticsearchDocumentPublisher"]
+        DLQ["DeadLetterQueue"]
+        TargetIndex["Elasticsearch target indices"]
+    end
+
+    DebeziumAdapter --> Runtime
+    CosmosAdapter --> Runtime
+    SpannerAdapter --> Runtime
+    OutboxAdapter --> Runtime
+    Runtime --> Backpressure
+    Runtime --> Builder
+    Builder <--> Store
+    Runtime --> Publisher
+    Publisher --> TargetIndex
+    Runtime --> DLQ
+
+    subgraph Query["Search Serving"]
+        ASGI["ASGI translation surface\n/health + /translate"]
+        OData["ODataTranslator"]
+        Gateway["SearchGatewayService"]
+        AzureRes["ResilientSearchBackend (azure)"]
+        ElasticRes["ResilientSearchBackend (elastic)"]
+        TenantPolicy["TenantPolicyEngine"]
+        QualityGate["ShadowQualityGate"]
+        AzureSearch["Azure AI Search"]
+        ElasticSearch["Elasticsearch query cluster"]
+    end
+
+    ASGI --> OData
+    Gateway --> TenantPolicy
+    Gateway --> QualityGate
+    Gateway --> AzureRes --> AzureSearch
+    Gateway --> ElasticRes --> ElasticSearch
+
+    subgraph Control["Control Plane and Operations"]
+        Cutover["DomainMigrationState\nbackend/search FSM"]
+        Reconcile["BucketedReconciliationEngine"]
+        Harness["Gateway harness"]
+        Telemetry["TelemetrySink / OpenTelemetry"]
+        Backfill["BackfillCoordinator"]
+    end
+
+    Cutover --> Gateway
+    Backfill --> Builder
+    Reconcile <--> Store
+    Reconcile <--> ElasticSearch
+    Harness --> Gateway
+    Telemetry -. spans / counters .-> Runtime
+    Telemetry -. spans / counters .-> Gateway
+    Telemetry -. spans / counters .-> Reconcile
+```
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          CHANGE DATA SOURCES                            │
@@ -252,7 +334,7 @@ class CanonicalDomainEvent(BaseModel):
     entity_type: str                  # e.g. "customerDocument"
     logical_entity_id: str            # Business key (not DB row ID)
     tenant_id: str                    # Multi-tenant discriminator
-    source_technology: SourceTechnology  # azure_sql | cosmos | spanner | ...
+    source_technology: SourceTechnology  # azure_sql | cosmos | spanner | firestore | alloydb | outbox
     source_version: int               # LSN or timestamp (nanoseconds) — monotonic
     event_time_utc: datetime          # When the change occurred in the source
     change_type: ChangeType           # upsert | delete | refresh | repair
@@ -303,12 +385,16 @@ class ProjectionStateRecord(BaseModel):
     status: ProjectionStatus               # See lifecycle below
     reason_code: str                       # Human-readable code for current status
     projection_version: int                # Increments on every publish
+    last_built_utc: datetime | None        # Last successful projection assembly time
+    last_published_utc: datetime | None    # Last successful publisher write time
+    last_source_change_utc: datetime | None  # Newest source event_time_utc seen for this entity
     missing_required_fragments: list[str]  # Fragment owners not yet seen
     stale_required_fragments: list[str]    # Fragments past their freshness TTL
     completeness_status: CompletenessStatus  # complete | partial | deleted
     last_payload_hash: str | None          # SHA-256 of last published payload
     entity_revision: int                   # Monotonic revision counter
     quarantine_reason: str | None          # Reason if quarantined
+    quarantine_at_utc: datetime | None     # When the entity entered quarantine
 ```
 
 **Entity lifecycle states:**
@@ -323,6 +409,10 @@ any state                 ──(poison message)           ──► QUARANTINED
 ```
 
 `READY_TO_BUILD` is a transient internal state used to mark entities that have enough acceptable fragments to attempt a build. `ProjectionRuntime` also treats it as a backpressure-bypass state so entities already near completion are allowed through under load.
+
+Additional contract status:
+- `STALE` exists in `ProjectionStatus` and is recognized by `ProjectionRuntime` as a backpressure-bypass status.
+- In the current builder implementation, required stale data is represented as `PENDING_REHYDRATION` plus `stale_required_fragments`, so `STALE` is primarily a compatibility / operator-visible status for custom stores and external tooling rather than the normal builder-produced path.
 
 ### 4.4 `SearchDocument` (`contracts/projection.py`)
 
@@ -932,7 +1022,7 @@ Telemetry emitted by `ResilientSearchBackend`:
 
 #### Shadow Quality Gate (`evaluation.py`)
 
-`ShadowQualityGate.evaluate()` runs **two mutually exclusive evaluation paths** depending on whether a `QueryJudgment` was provided:
+`ShadowQualityGate.evaluate()` runs **one of two evaluation paths** depending on whether a `QueryJudgment` was provided:
 
 **Path A — Judgment-based (NDCG/MRR):** fires when `primary_metrics` AND `shadow_metrics` are both non-None:
 - If `shadow_ndcg_at_10 < min_shadow_ndcg_at_10` OR `ndcg_drop > max_ndcg_drop` OR `shadow_mrr < min_shadow_mrr` → `ShadowQualityEvent(code="shadow_relevance_regression", severity="high")`
@@ -1114,11 +1204,13 @@ All platform components accept a `TelemetrySink` (Protocol) — never a concrete
 
 ```python
 class TelemetrySink(Protocol):
-    def emit(self, event: TelemetryEvent) -> None: ...
-    def increment(self, name: str, value: int = 1, tags: dict[str, str] | None = None) -> None: ...
-    def record_timing(self, name: str, duration_ms: float, tags: ..., trace_id: ...) -> None: ...
-    def start_span(self, name: str, trace_id: str | None, attributes: ...) -> TelemetrySpan: ...
+    def emit(self, event: TelemetryEvent | Mapping[str, Any]) -> None: ...
+    def increment(self, name: str, value: int = 1, *, tags: Mapping[str, str] | None = None) -> None: ...
+    def record_timing(self, name: str, duration_ms: float, *, tags: Mapping[str, str] | None = None, trace_id: str | None = None) -> None: ...
+    def start_span(self, name: str, *, trace_id: str | None = None, attributes: Mapping[str, Any] | None = None) -> TelemetrySpan: ...
 ```
+
+`emit()` accepts either a strongly typed `TelemetryEvent` or a plain mapping. All built-in sinks normalize both forms so lightweight dict events can be emitted without constructing a Pydantic model at every call site.
 
 #### Implementations
 
@@ -1189,9 +1281,61 @@ The span **does not suppress exceptions** (`__exit__` always returns `False`). I
 | `search.backend.circuit_rejected` | Counter | Requests blocked by open circuit |
 | `search.backend.circuit_opened` | Counter | Circuit transitions to OPEN |
 
+**Important backend span events:**
+
+| Event | When emitted |
+|---|---|
+| `circuit_half_open` | An OPEN circuit reaches `recovery_timeout_seconds` and allows a probe request |
+| `circuit_closed` | A HALF_OPEN probe succeeds and the circuit returns to CLOSED |
+| `circuit_open` | Failure threshold is breached or a HALF_OPEN probe fails and the circuit reopens |
+
 ---
 
 ## 6. End-to-End Data Flow: Event Ingestion Path
+
+### Mermaid View
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Source as CDC source / outbox
+    participant Adapter as SourceAdapter
+    participant Runtime as ProjectionRuntime
+    participant Builder as ProjectionBuilder
+    participant Store as ProjectionStateStore
+    participant Publisher as ElasticsearchDocumentPublisher
+    participant ES as Elasticsearch
+    participant DLQ as DeadLetterQueue
+
+    Source->>Adapter: vendor record
+    Adapter->>Runtime: CanonicalDomainEvent
+    Runtime->>Runtime: pending_count() + bypass checks
+
+    alt throttled by backpressure
+        Runtime-->>Source: reject / retry later
+    else accepted
+        Runtime->>Builder: upsert(event, now_utc)
+        Builder->>Store: mutate_entity(key, mutator)
+        Store-->>Builder: ProjectionMutationResult
+
+        alt publish = false
+            Builder-->>Runtime: pending / quarantined decision
+            Runtime-->>Source: accepted, no publish
+        else publish = true
+            Builder-->>Runtime: SearchDocument + projection_version
+            Runtime->>Publisher: publish(document, trace_id)
+
+            alt write succeeds
+                Publisher->>ES: PUT /{alias}/_doc/{id}?version=N&version_type=external
+                ES-->>Runtime: 2xx
+                Runtime-->>Source: accepted
+            else write fails or ES returns 409
+                Publisher-->>Runtime: exception
+                Runtime->>DLQ: failed event + document
+            end
+        end
+    end
+```
 
 This walk-through traces a single change event from database to search index.
 
@@ -1252,7 +1396,8 @@ This walk-through traces a single change event from database to search index.
        ?version=7&version_type=external
    Body: {tenant_id, domain_name, entity_type, ...merged payload fields}
 
-7. Elasticsearch accepts the write (or rejects with 409 if version too old — safe idempotency)
+7. Elasticsearch accepts the write (or rejects with 409 if the stored external version is not lower).
+   In the current runtime, a 409 is treated as a publish failure and the event+document are sent to the DLQ for review.
 
 8. Telemetry emitted:
    - projection.upsert.total{published=true} += 1
@@ -1263,6 +1408,86 @@ This walk-through traces a single change event from database to search index.
 ---
 
 ## 7. End-to-End Data Flow: Search Query Path
+
+### Mermaid View
+
+The query path has two separate pictorial views because the current codebase intentionally separates the ASGI translation surface from the routed `SearchGatewayService`.
+
+#### ASGI Translation Surface
+
+```mermaid
+flowchart LR
+    Client["Client"] --> Middleware["APIKeyAndBodyLimitMiddleware"]
+    Middleware -->|GET /health| Health["200 OK"]
+    Middleware -->|POST /translate| Translator["ODataTranslator"]
+    Translator --> DSL["Elasticsearch DSL JSON"]
+```
+
+#### Routed Search Service
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller
+    participant Gateway as SearchGatewayService
+    participant Policy as TenantPolicyEngine + ODataTranslator
+    participant Azure as ResilientSearchBackend (azure)
+    participant Elastic as ResilientSearchBackend (elastic)
+    participant Gate as ShadowQualityGate
+
+    Caller->>Gateway: search(consumer_id, tenant_id, entity_type, raw_params)
+
+    alt AZURE_ONLY
+        Gateway->>Azure: primary request
+        Azure-->>Gateway: results
+    else ELASTIC_ONLY
+        Gateway->>Policy: resolve route + translate params
+        Policy-->>Gateway: elastic request
+        Gateway->>Elastic: primary request
+        Elastic-->>Gateway: results
+    else SHADOW
+        Gateway->>Azure: primary request
+        Azure-->>Gateway: results
+        opt sampled for shadow observation
+            Gateway->>Policy: resolve route + translate params
+            Policy-->>Gateway: elastic request
+            Gateway->>Elastic: shadow request
+            Elastic-->>Gateway: shadow results
+            Gateway->>Gate: compare + evaluate quality
+            Gate-->>Gateway: pass / regression event
+        end
+    else CANARY
+        Gateway->>Gateway: bucket tenant_id:consumer_id
+        alt canary bucket routed to Elastic
+            Gateway->>Policy: resolve route + translate params
+            Policy-->>Gateway: elastic request
+            Gateway->>Elastic: primary request
+            Elastic-->>Gateway: results
+            opt sampled shadow
+                Gateway->>Azure: shadow request
+                Azure-->>Gateway: shadow results
+            end
+        else non-canary bucket routed to Azure
+            Gateway->>Azure: primary request
+            Azure-->>Gateway: results
+            opt sampled shadow
+                Gateway->>Policy: resolve route + translate params
+                Policy-->>Gateway: elastic request
+                Gateway->>Elastic: shadow request
+                Elastic-->>Gateway: shadow results
+            end
+        end
+        opt shadow results available
+            Gateway->>Gate: compare + evaluate quality
+            Gate-->>Gateway: pass / regression event
+            opt regression and auto-disable enabled
+                Gateway->>Gateway: canary_frozen = True\ncanary_percent = 0
+            end
+        end
+    end
+
+    Gateway-->>Caller: primary backend response
+```
 
 ```
 1. Translation surface path (`asgi.py`):
