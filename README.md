@@ -11,18 +11,23 @@ This repository is intentionally designed as a production-grade starter, not a f
 
 - Canonical domain event contract
 - Projection builder with incomplete-projection handling
+- Atomic projection mutation through a pluggable projection state store
 - Pluggable projection state store with durable SQLite implementation
 - Spanner-backed projection state store contract and schema-driven implementation path
 - Independent backend and search cutover state machines
 - Tenant routing policy engine and alias-routing model
+- Whale-tenant ingestion partition policy
 - Search Gateway service and OData to Elasticsearch translator
 - Search evaluation harness with live overlap and offline judged relevance metrics
 - Operational shadow quality gate with telemetry-ready events
 - Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
+- Gateway bootstrap that makes resilient wrappers and telemetry explicit at startup
 - Backfill coordinator with side-load to stream-handoff planning
 - Firestore outbox normalization model
 - Reconciliation engine with tenant, cohort, and delete-aware validation
-- Bucketed anti-entropy reconciliation for hash-first drift detection
+- Recursive bucketed anti-entropy reconciliation for hash-first drift detection
+- Projection runtime wrapper with backpressure and dead-letter handling
+- Observability primitives for structured events, counters, timings, and spans
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
@@ -123,20 +128,26 @@ But:
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
 - `gateway/resilience.py`
   Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
+- `gateway/bootstrap.py`
+  Production-safe gateway startup that wraps raw backends and rejects silent telemetry in non-dev environments
+- `observability/telemetry.py`
+  Structured telemetry events, counters, timings, and trace-like spans
 - `reconciliation/engine.py`
-  Snapshot reconciliation plus bucketed anti-entropy and bucket-level drill-down
+  Snapshot reconciliation plus recursive bucketed anti-entropy and bucket-level drill-down
 - `routing/tenant_policy.py`
-  Shared-index versus dedicated-index alias routing policy
+  Shared-index versus dedicated-index alias routing policy plus whale-tenant ingestion partitioning
 - `projection/bootstrap.py`
   Runtime bootstrap helper that forbids in-memory projection state outside local/dev/test
+- `projection/runtime.py`
+  Backpressure and DLQ wrapper around projection processing
 
 ## Immediate next steps
 
 1. Wire `SpannerProjectionStateStore` to a real `google-cloud-spanner` database in non-local environments and provision the published DDL.
 2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
-3. Extend bucketed reconciliation into a multi-level Merkle-style validation workflow for billion-document domains.
-4. Add end-to-end replay, DLQ handling, and rehydration workers for pending projections.
-5. Add live Azure Search and Elasticsearch query clients behind the gateway, then wire the resilient backend wrapper into production startup and telemetry pipelines.
+3. Add live Azure Search and Elasticsearch query clients behind the gateway and a real Elasticsearch index writer with external versioning.
+4. Route telemetry into OpenTelemetry exporters or a real metrics backend instead of in-memory/logger sinks.
+5. Add auth, secret-provider integration, and production replay/rehydration workers for pending projections.
 
 ## Status
 

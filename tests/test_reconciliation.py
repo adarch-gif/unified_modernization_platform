@@ -99,3 +99,37 @@ def test_bucketed_snapshot_can_compare_without_document_drilldown() -> None:
     codes = {finding.code for finding in report.findings}
     assert "bucket_mismatch" in codes
     assert "bucket_drilldown_unavailable" in codes
+
+
+def test_bucketed_reconciliation_recurses_before_leaf_comparison() -> None:
+    engine = BucketedReconciliationEngine()
+    source = StoreSnapshot(
+        name="source",
+        documents={
+            "1": DocumentFingerprint(checksum="aaa"),
+            "2": DocumentFingerprint(checksum="bbb"),
+            "3": DocumentFingerprint(checksum="ccc"),
+            "4": DocumentFingerprint(checksum="ddd"),
+        },
+    )
+    target = StoreSnapshot(
+        name="target",
+        documents={
+            "1": DocumentFingerprint(checksum="aaa"),
+            "2": DocumentFingerprint(checksum="bbb"),
+            "3": DocumentFingerprint(checksum="zzz"),
+            "4": DocumentFingerprint(checksum="ddd"),
+        },
+    )
+
+    report = engine.compare_store_snapshots(
+        source,
+        target,
+        bucket_count=1,
+        max_recursive_depth=3,
+        target_leaf_size=1,
+    )
+
+    codes = {finding.code for finding in report.findings}
+    assert "bucket_mismatch" in codes
+    assert "bucket_checksum_drift" in codes

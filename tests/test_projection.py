@@ -150,6 +150,7 @@ def test_projection_state_persists_in_sqlite_store(tmp_path: Path) -> None:
 
     assert persisted_state is not None
     assert persisted_state.status == ProjectionStatus.PUBLISHED
+    assert persisted_state.entity_revision >= 1
     assert store.pending_count() == 0
 
 
@@ -267,6 +268,7 @@ def test_projection_state_persists_in_spanner_store() -> None:
 
     assert persisted_state is not None
     assert persisted_state.status == ProjectionStatus.PUBLISHED
+    assert persisted_state.entity_revision >= 1
     assert store.pending_count() == 0
     assert len(database.fragments) == 1
 
@@ -316,6 +318,43 @@ def test_spanner_store_ignores_older_fragment_versions() -> None:
     )
 
     assert fragments["document_core"].payload["title"] == "Newer"
+
+
+def test_projection_entity_revision_increments_across_updates() -> None:
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[DependencyRule(owner="document_core", required=True)],
+            )
+        ]
+    )
+    first = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-5",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=1,
+        fragment_owner="document_core",
+        payload={"title": "First"},
+    )
+    second = CanonicalDomainEvent(
+        domain_name="customer_documents",
+        entity_type="customerDocument",
+        logical_entity_id="doc-5",
+        tenant_id="tenant-1",
+        source_technology=SourceTechnology.COSMOS,
+        source_version=2,
+        fragment_owner="document_core",
+        payload={"title": "Second"},
+    )
+
+    first_decision = builder.upsert(first)
+    second_decision = builder.upsert(second)
+
+    assert first_decision.state.entity_revision == 1
+    assert second_decision.state.entity_revision == 2
 
 
 def test_projection_builder_rejects_in_memory_state_in_prod() -> None:

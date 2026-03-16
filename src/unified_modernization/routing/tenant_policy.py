@@ -19,6 +19,14 @@ class TenantPolicy(BaseModel):
     routing_key: str | None = None
 
 
+class IngestionPartitionPolicy(BaseModel):
+    tenant_id: str
+    entity_type: str
+    partition_key: str
+    partition_group: str
+    dedicated: bool = False
+
+
 class TenantPolicyEngine:
     """Deterministic starter policy for shared versus dedicated routing."""
 
@@ -42,4 +50,38 @@ class TenantPolicyEngine:
             write_alias=f"{entity_type}-{bucket.value}-write",
             read_alias=f"{entity_type}-{bucket.value}-read",
             routing_key=tenant_id,
+        )
+
+
+class IngestionPartitionPolicyEngine:
+    """Deterministic ingestion partitioning with dedicated lanes for whale tenants."""
+
+    def __init__(
+        self,
+        *,
+        whale_tenants: set[str] | None = None,
+        shared_partition_count: int = 32,
+    ) -> None:
+        self._whale_tenants = whale_tenants or set()
+        self._shared_partition_count = shared_partition_count
+
+    def resolve(self, tenant_id: str, entity_type: str) -> IngestionPartitionPolicy:
+        if tenant_id in self._whale_tenants:
+            partition_group = f"{entity_type}-{tenant_id}"
+            return IngestionPartitionPolicy(
+                tenant_id=tenant_id,
+                entity_type=entity_type,
+                partition_key=f"{partition_group}:dedicated",
+                partition_group=partition_group,
+                dedicated=True,
+            )
+
+        partition_id = sum(map(ord, f"{tenant_id}:{entity_type}")) % self._shared_partition_count
+        partition_group = f"{entity_type}-shared-{partition_id:02d}"
+        return IngestionPartitionPolicy(
+            tenant_id=tenant_id,
+            entity_type=entity_type,
+            partition_key=f"{partition_group}:{tenant_id}",
+            partition_group=partition_group,
+            dedicated=False,
         )

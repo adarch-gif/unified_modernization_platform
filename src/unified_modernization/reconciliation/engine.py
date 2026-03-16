@@ -252,6 +252,8 @@ class BucketedReconciliationEngine:
         *,
         drill_down: bool = True,
         max_drilldown_buckets: int = 16,
+        max_recursive_depth: int = 3,
+        target_leaf_size: int = 128,
     ) -> ReconciliationReport:
         findings: list[ReconciliationFinding] = []
         all_bucket_ids = sorted(set(source.buckets).union(target.buckets))
@@ -288,6 +290,9 @@ class BucketedReconciliationEngine:
                     source,
                     target,
                     mismatched_buckets[:max_drilldown_buckets],
+                    depth=1,
+                    max_recursive_depth=max_recursive_depth,
+                    target_leaf_size=target_leaf_size,
                 )
             )
 
@@ -300,6 +305,8 @@ class BucketedReconciliationEngine:
         *,
         bucket_count: int = 1024,
         max_drilldown_buckets: int = 16,
+        max_recursive_depth: int = 3,
+        target_leaf_size: int = 128,
     ) -> ReconciliationReport:
         source_bucketed = self.build_snapshot(
             source.name,
@@ -318,6 +325,8 @@ class BucketedReconciliationEngine:
             target_bucketed,
             drill_down=True,
             max_drilldown_buckets=max_drilldown_buckets,
+            max_recursive_depth=max_recursive_depth,
+            target_leaf_size=target_leaf_size,
         )
 
     def _drill_down(
@@ -325,6 +334,10 @@ class BucketedReconciliationEngine:
         source: BucketedStoreSnapshot,
         target: BucketedStoreSnapshot,
         bucket_ids: list[str],
+        *,
+        depth: int,
+        max_recursive_depth: int,
+        target_leaf_size: int,
     ) -> list[ReconciliationFinding]:
         findings: list[ReconciliationFinding] = []
         for bucket_id in bucket_ids:
@@ -341,55 +354,99 @@ class BucketedReconciliationEngine:
                 )
                 continue
 
-            source_ids = {
-                document_id
-                for document_id, fingerprint in source_documents.items()
-                if not fingerprint.is_deleted
-            }
-            target_ids = {
-                document_id
-                for document_id, fingerprint in target_documents.items()
-                if not fingerprint.is_deleted
-            }
+            if depth >= max_recursive_depth or max(len(source_documents), len(target_documents)) <= target_leaf_size:
+                findings.extend(self._compare_document_maps(bucket_id, source_documents, target_documents))
+                continue
 
-            missing_ids = sorted(source_ids - target_ids)
-            if missing_ids:
-                findings.append(
-                    ReconciliationFinding(
-                        severity="critical",
-                        code="bucket_missing_documents",
-                        message=f"{len(missing_ids)} documents missing in mismatched bucket {bucket_id}",
-                        affected_ids=missing_ids[:25],
-                    )
+            source_children = self._split_documents(source_documents, parent_bucket_id=bucket_id, depth=depth)
+            target_children = self._split_documents(target_documents, parent_bucket_id=bucket_id, depth=depth)
+            child_bucket_ids = sorted(set(source_children).union(target_children))
+            child_source_snapshot = BucketedStoreSnapshot(
+                name=source.name,
+                bucket_count=len(child_bucket_ids) or 1,
+                buckets={
+                    child_id: self._digest_bucket(child_id, bucket_documents)
+                    for child_id, bucket_documents in source_children.items()
+                },
+                bucket_documents=source_children,
+            )
+            child_target_snapshot = BucketedStoreSnapshot(
+                name=target.name,
+                bucket_count=len(child_bucket_ids) or 1,
+                buckets={
+                    child_id: self._digest_bucket(child_id, bucket_documents)
+                    for child_id, bucket_documents in target_children.items()
+                },
+                bucket_documents=target_children,
+            )
+            findings.extend(
+                self._drill_down(
+                    child_source_snapshot,
+                    child_target_snapshot,
+                    child_bucket_ids,
+                    depth=depth + 1,
+                    max_recursive_depth=max_recursive_depth,
+                    target_leaf_size=target_leaf_size,
                 )
+            )
 
-            unexpected_ids = sorted(target_ids - source_ids)
-            if unexpected_ids:
-                findings.append(
-                    ReconciliationFinding(
-                        severity="critical",
-                        code="bucket_unexpected_documents",
-                        message=f"{len(unexpected_ids)} extra documents in mismatched bucket {bucket_id}",
-                        affected_ids=unexpected_ids[:25],
-                    )
+        return findings
+
+    def _compare_document_maps(
+        self,
+        bucket_id: str,
+        source_documents: dict[str, DocumentFingerprint],
+        target_documents: dict[str, DocumentFingerprint],
+    ) -> list[ReconciliationFinding]:
+        findings: list[ReconciliationFinding] = []
+        source_ids = {
+            document_id
+            for document_id, fingerprint in source_documents.items()
+            if not fingerprint.is_deleted
+        }
+        target_ids = {
+            document_id
+            for document_id, fingerprint in target_documents.items()
+            if not fingerprint.is_deleted
+        }
+
+        missing_ids = sorted(source_ids - target_ids)
+        if missing_ids:
+            findings.append(
+                ReconciliationFinding(
+                    severity="critical",
+                    code="bucket_missing_documents",
+                    message=f"{len(missing_ids)} documents missing in mismatched bucket {bucket_id}",
+                    affected_ids=missing_ids[:25],
                 )
+            )
 
-            shared_ids = sorted(source_ids.intersection(target_ids))
-            drifted_ids = [
-                document_id
-                for document_id in shared_ids
-                if source_documents[document_id].checksum != target_documents[document_id].checksum
-            ]
-            if drifted_ids:
-                findings.append(
-                    ReconciliationFinding(
-                        severity="critical",
-                        code="bucket_checksum_drift",
-                        message=f"{len(drifted_ids)} documents drifted in mismatched bucket {bucket_id}",
-                        affected_ids=drifted_ids[:25],
-                    )
+        unexpected_ids = sorted(target_ids - source_ids)
+        if unexpected_ids:
+            findings.append(
+                ReconciliationFinding(
+                    severity="critical",
+                    code="bucket_unexpected_documents",
+                    message=f"{len(unexpected_ids)} extra documents in mismatched bucket {bucket_id}",
+                    affected_ids=unexpected_ids[:25],
                 )
+            )
 
+        shared_ids = sorted(source_ids.intersection(target_ids))
+        drifted_ids = [
+            document_id
+            for document_id in shared_ids
+            if source_documents[document_id].checksum != target_documents[document_id].checksum
+        ]
+        if drifted_ids:
+            findings.append(
+                ReconciliationFinding(
+                    severity="critical",
+                    code="bucket_checksum_drift",
+                    message=f"{len(drifted_ids)} documents drifted in mismatched bucket {bucket_id}",
+                    affected_ids=drifted_ids[:25],
+                )
+            )
         return findings
 
     @staticmethod
@@ -434,6 +491,21 @@ class BucketedReconciliationEngine:
             tenant_scope_checksum=self._hash_counter(tenant_scope),
             cohort_scope_checksum=self._hash_counter(cohort_scope),
         )
+
+    @staticmethod
+    def _split_documents(
+        documents: dict[str, DocumentFingerprint],
+        *,
+        parent_bucket_id: str,
+        depth: int,
+        fanout: int = 16,
+    ) -> dict[str, dict[str, DocumentFingerprint]]:
+        grouped: dict[str, dict[str, DocumentFingerprint]] = {}
+        for document_id, fingerprint in documents.items():
+            suffix = int(hashlib.sha256(f"{parent_bucket_id}:{depth}:{document_id}".encode("utf-8")).hexdigest(), 16) % fanout
+            child_bucket_id = f"{parent_bucket_id}/child-{suffix:02d}"
+            grouped.setdefault(child_bucket_id, {})[document_id] = fingerprint
+        return grouped
 
     @staticmethod
     def _hash_values(values: list[str]) -> str:

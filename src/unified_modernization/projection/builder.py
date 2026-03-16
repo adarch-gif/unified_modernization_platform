@@ -10,7 +10,9 @@ from unified_modernization.contracts.projection import (
     CompletenessStatus,
     DependencyPolicy,
     FragmentRecord,
+    ProjectionEntityRecord,
     ProjectionKey,
+    ProjectionMutationResult,
     ProjectionStateRecord,
     ProjectionStatus,
     PublicationDecision,
@@ -54,7 +56,6 @@ class ProjectionBuilder:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
         policy = self._policies[event.entity_type]
         key = self._projection_key(event)
-        fragments = self._state_store.get_fragments(key)
 
         incoming = FragmentRecord(
             tenant_id=event.tenant_id,
@@ -68,8 +69,46 @@ class ProjectionBuilder:
             payload=event.payload,
             delete_flag=event.change_type == ChangeType.DELETE,
         )
-        self._state_store.upsert_fragment(key, incoming)
-        fragments = self._state_store.get_fragments(key)
+
+        result = self._state_store.mutate_entity(
+            key,
+            lambda entity: self._mutate_entity(
+                entity=entity,
+                incoming=incoming,
+                event=event,
+                now=now,
+                policy=policy,
+            ),
+        )
+        return result.decision
+
+    def _mutate_entity(
+        self,
+        *,
+        entity: ProjectionEntityRecord,
+        incoming: FragmentRecord,
+        event: CanonicalDomainEvent,
+        now: datetime,
+        policy: DependencyPolicy,
+    ) -> ProjectionMutationResult:
+        current = entity.fragments.get(incoming.fragment_owner)
+        if current is None or incoming.source_version >= current.source_version:
+            entity.fragments[incoming.fragment_owner] = incoming
+
+        fragments = entity.fragments
+        state = entity.state or ProjectionStateRecord(
+            tenant_id=event.tenant_id,
+            domain_name=event.domain_name,
+            entity_type=event.entity_type,
+            logical_entity_id=event.logical_entity_id,
+            status=ProjectionStatus.PENDING_REQUIRED_FRAGMENT,
+            reason_code="initial_state",
+        )
+        entity.state = state
+
+        prior_source_change = state.last_source_change_utc
+        if prior_source_change is None or event.event_time_utc > prior_source_change:
+            state.last_source_change_utc = event.event_time_utc
 
         missing: list[str] = []
         stale: list[str] = []
@@ -82,15 +121,6 @@ class ProjectionBuilder:
             if rule.required and rule.is_stale(fragment.event_time_utc, now):
                 stale.append(rule.owner)
 
-        state = self._state_store.get_state(key) or ProjectionStateRecord(
-            tenant_id=event.tenant_id,
-            domain_name=event.domain_name,
-            entity_type=event.entity_type,
-            logical_entity_id=event.logical_entity_id,
-            status=ProjectionStatus.PENDING_REQUIRED_FRAGMENT,
-            reason_code="initial_state",
-        )
-        state.last_source_change_utc = event.event_time_utc
         state.missing_required_fragments = missing
         state.stale_required_fragments = stale
 
@@ -98,15 +128,19 @@ class ProjectionBuilder:
             state.status = ProjectionStatus.PENDING_REQUIRED_FRAGMENT
             state.reason_code = "missing_required_fragment"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._state_store.save_state(key, state)
-            return PublicationDecision(publish=False, state=state)
+            return ProjectionMutationResult(
+                entity=entity,
+                decision=PublicationDecision(publish=False, state=state),
+            )
 
         if stale:
             state.status = ProjectionStatus.PENDING_REHYDRATION
             state.reason_code = "stale_required_fragment"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._state_store.save_state(key, state)
-            return PublicationDecision(publish=False, state=state)
+            return ProjectionMutationResult(
+                entity=entity,
+                decision=PublicationDecision(publish=False, state=state),
+            )
 
         merged_payload: dict[str, Any] = {}
         source_versions: dict[str, int] = {}
@@ -126,19 +160,21 @@ class ProjectionBuilder:
             state.completeness_status = CompletenessStatus.DELETED
             state.last_built_utc = now
             state.last_published_utc = now
-            self._state_store.save_state(key, state)
-            return PublicationDecision(
-                publish=True,
-                state=state,
-                document=SearchDocument(
-                    document_id=event.logical_entity_id,
-                    tenant_id=event.tenant_id,
-                    domain_name=event.domain_name,
-                    entity_type=event.entity_type,
-                    projection_version=state.projection_version,
-                    completeness_status=CompletenessStatus.DELETED,
-                    source_versions=source_versions,
-                    payload={"is_deleted": True},
+            return ProjectionMutationResult(
+                entity=entity,
+                decision=PublicationDecision(
+                    publish=True,
+                    state=state,
+                    document=SearchDocument(
+                        document_id=event.logical_entity_id,
+                        tenant_id=event.tenant_id,
+                        domain_name=event.domain_name,
+                        entity_type=event.entity_type,
+                        projection_version=state.projection_version,
+                        completeness_status=CompletenessStatus.DELETED,
+                        source_versions=source_versions,
+                        payload={"is_deleted": True},
+                    ),
                 ),
             )
 
@@ -147,8 +183,10 @@ class ProjectionBuilder:
             state.status = ProjectionStatus.PENDING_REQUIRED_FRAGMENT
             state.reason_code = "optional_publish_disabled"
             state.completeness_status = CompletenessStatus.PARTIAL
-            self._state_store.save_state(key, state)
-            return PublicationDecision(publish=False, state=state)
+            return ProjectionMutationResult(
+                entity=entity,
+                decision=PublicationDecision(publish=False, state=state),
+            )
         if len(source_versions) < len(policy.rules):
             completeness = CompletenessStatus.PARTIAL
 
@@ -162,7 +200,6 @@ class ProjectionBuilder:
         state.completeness_status = completeness
         state.last_built_utc = now
         state.last_published_utc = now
-        self._state_store.save_state(key, state)
 
         document = SearchDocument(
             document_id=event.logical_entity_id,
@@ -174,7 +211,10 @@ class ProjectionBuilder:
             source_versions=source_versions,
             payload=merged_payload,
         )
-        return PublicationDecision(publish=True, state=state, document=document)
+        return ProjectionMutationResult(
+            entity=entity,
+            decision=PublicationDecision(publish=True, state=state, document=document),
+        )
 
     def get_state(
         self,

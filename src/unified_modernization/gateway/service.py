@@ -11,7 +11,7 @@ from unified_modernization.gateway.evaluation import (
     ShadowQualityGate,
 )
 from unified_modernization.gateway.odata import ODataTranslator
-from unified_modernization.gateway.resilience import NoopTelemetrySink, TelemetrySink
+from unified_modernization.observability.telemetry import NoopTelemetrySink, TelemetryEvent, TelemetrySink
 from unified_modernization.routing.tenant_policy import TenantPolicyEngine
 
 
@@ -74,32 +74,49 @@ class SearchGatewayService:
         entity_type: str,
         raw_params: dict[str, str],
     ) -> dict[str, Any]:
+        trace_id = raw_params.get("trace_id")
         azure_request = {
             "params": raw_params,
             "tenant_id": tenant_id,
             "entity_type": entity_type,
+            "trace_id": trace_id,
         }
         elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
-        if self._mode == TrafficMode.AZURE_ONLY:
-            return await self._azure.query(azure_request)
-        if self._mode == TrafficMode.ELASTIC_ONLY:
-            return await self._elastic.query(elastic_request)
-        if self._mode == TrafficMode.SHADOW:
-            primary = await self._azure.query(azure_request)
-            shadow = await self._elastic.query(elastic_request)
-            self.last_shadow_comparison = self._compare(primary, shadow)
-            self.last_shadow_quality_gate = self._evaluate_shadow_quality(
-                tenant_id=tenant_id,
-                entity_type=entity_type,
-                raw_params=raw_params,
-                primary=primary,
-                shadow=shadow,
-                live_comparison=self.last_shadow_comparison,
+        with self._telemetry_sink.start_span(
+            "search.gateway.request",
+            trace_id=trace_id,
+            attributes={
+                "mode": self._mode.value,
+                "tenant_id": tenant_id,
+                "entity_type": entity_type,
+            },
+        ):
+            self._telemetry_sink.increment(
+                "search.gateway.requests",
+                tags={"mode": self._mode.value, "entity_type": entity_type},
             )
-            return primary
-        if self._bucket(f"{tenant_id}:{consumer_id}") < self._canary_percent:
-            return await self._elastic.query(elastic_request)
-        return await self._azure.query(azure_request)
+            if self._mode == TrafficMode.AZURE_ONLY:
+                return await self._azure.query(azure_request)
+            if self._mode == TrafficMode.ELASTIC_ONLY:
+                return await self._elastic.query(elastic_request)
+            if self._mode == TrafficMode.SHADOW:
+                primary = await self._azure.query(azure_request)
+                shadow = await self._elastic.query(elastic_request)
+                self.last_shadow_comparison = self._compare(primary, shadow)
+                self.last_shadow_quality_gate = self._evaluate_shadow_quality(
+                    tenant_id=tenant_id,
+                    entity_type=entity_type,
+                    raw_params=raw_params,
+                    primary=primary,
+                    shadow=shadow,
+                    live_comparison=self.last_shadow_comparison,
+                )
+                return primary
+            if self._bucket(f"{tenant_id}:{consumer_id}") < self._canary_percent:
+                self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "elastic"})
+                return await self._elastic.query(elastic_request)
+            self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "azure"})
+            return await self._azure.query(azure_request)
 
     def _bucket(self, consumer_id: str) -> int:
         return int(hashlib.md5(consumer_id.encode("utf-8")).hexdigest(), 16) % 100
@@ -111,6 +128,7 @@ class SearchGatewayService:
             "entity_type": entity_type,
             "alias": policy.read_alias,
             "routing": policy.routing_key,
+            "trace_id": raw_params.get("trace_id"),
             "query": self._translator.translate(raw_params),
         }
 
@@ -161,8 +179,29 @@ class SearchGatewayService:
             shadow_metrics=shadow_metrics,
         )
         payload = self._decision_payload(decision)
+        if live_comparison.get("identical_order") is False:
+            self._telemetry_sink.increment(
+                "search.shadow.order_mismatch",
+                tags={"entity_type": entity_type},
+            )
         if decision.event is not None:
+            self._telemetry_sink.increment(
+                "search.shadow.regression",
+                tags={"code": decision.event.code, "entity_type": entity_type},
+            )
             self._telemetry_sink.emit(payload)
+        elif shadow_metrics is not None:
+            self._telemetry_sink.emit(
+                TelemetryEvent(
+                    event_type="shadow_quality_healthy",
+                    trace_id=query_id,
+                    attributes={
+                        "entity_type": entity_type,
+                        "shadow_ndcg_at_10": shadow_metrics.ndcg_at_10,
+                        "shadow_mrr": shadow_metrics.mrr,
+                    },
+                )
+            )
         return payload
 
     @staticmethod

@@ -14,17 +14,17 @@
 - implement real source adapters
 - implement real Elasticsearch write client
 - implement gateway clients for Azure Search and Elasticsearch
-- wire tenant alias routing into live gateway clients
-- wire resilient backend wrappers and telemetry sinks into live gateway startup
+- wire tenant alias routing and ingestion partition policies into live gateway and ingestion clients
+- wire resilient backend wrappers and real telemetry exporters into live gateway startup
 - implement batch side-load path and source-watermark capture for backfill
 
 ## Phase 2
 
-- add replay and DLQ handling
+- add replay and production DLQ handling
 - add reconciliation by entity cohort and tenant
-- move reconciliation from single-level buckets toward recursive bucket or Merkle validation
+- back remote reconciliation with streamed digest APIs and deeper Merkle validation
 - add domain onboarding config loader
-- add metrics and tracing
+- add OpenTelemetry exporters and dashboards
 - add judged query corpus and offline relevance evaluation workflow
 - route quality-gate events into production alerting
 

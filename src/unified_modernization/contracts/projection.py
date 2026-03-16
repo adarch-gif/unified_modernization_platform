@@ -85,6 +85,14 @@ class ProjectionStateRecord(BaseModel):
     stale_required_fragments: list[str] = Field(default_factory=list)
     completeness_status: CompletenessStatus = CompletenessStatus.PARTIAL
     last_payload_hash: str | None = None
+    entity_revision: int = 0
+
+
+class ProjectionEntityRecord(BaseModel):
+    key: ProjectionKey
+    fragments: dict[str, FragmentRecord] = Field(default_factory=dict)
+    state: ProjectionStateRecord | None = None
+    revision: int = 0
 
 
 class SearchDocument(BaseModel):
@@ -102,3 +110,8 @@ class PublicationDecision(BaseModel):
     publish: bool
     state: ProjectionStateRecord
     document: SearchDocument | None = None
+
+
+class ProjectionMutationResult(BaseModel):
+    entity: ProjectionEntityRecord
+    decision: PublicationDecision

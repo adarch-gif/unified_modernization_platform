@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from unified_modernization.gateway.bootstrap import GatewayRuntimeConfig, build_search_gateway_service
 from unified_modernization.gateway.evaluation import (
     QueryEvaluationCase,
     QueryJudgment,
@@ -11,6 +12,7 @@ from unified_modernization.gateway.evaluation import (
 from unified_modernization.gateway.odata import ODataTranslator
 from unified_modernization.gateway.resilience import CircuitOpenError, ResilientSearchBackend
 from unified_modernization.gateway.service import SearchGatewayService, TrafficMode
+from unified_modernization.observability.telemetry import InMemoryTelemetrySink
 from unified_modernization.routing.tenant_policy import TenantPolicyEngine
 
 
@@ -65,14 +67,6 @@ class _FlakyBackend:
             raise TimeoutError("backend timeout")
         index = min(self.calls - self._failures - 1, len(self._responses) - 1)
         return self._responses[index]
-
-
-class _CapturingTelemetrySink:
-    def __init__(self) -> None:
-        self.events: list[dict] = []
-
-    def emit(self, event: dict) -> None:
-        self.events.append(event)
 
 
 class _StaticJudgmentProvider:
@@ -158,7 +152,7 @@ def test_evaluation_harness_calculates_ndcg_and_mrr() -> None:
 def test_shadow_quality_gate_emits_relevance_regression_event() -> None:
     azure = _FakeBackend({"results": [{"id": "doc-1"}, {"id": "doc-2"}]})
     elastic = _FakeBackend({"results": [{"id": "doc-x"}, {"id": "doc-1"}]})
-    telemetry = _CapturingTelemetrySink()
+    telemetry = InMemoryTelemetrySink()
     service = SearchGatewayService(
         azure_backend=azure,
         elastic_backend=elastic,
@@ -181,7 +175,7 @@ def test_shadow_quality_gate_emits_relevance_regression_event() -> None:
 
     assert service.last_shadow_quality_gate is not None
     assert service.last_shadow_quality_gate["event"]["code"] == "shadow_relevance_regression"
-    assert telemetry.events[0]["event"]["code"] == "shadow_relevance_regression"
+    assert any(event["attributes"]["event"]["code"] == "shadow_relevance_regression" for event in telemetry.events if "event" in event["attributes"])
 
 
 def test_resilient_backend_retries_and_recovers() -> None:
@@ -200,7 +194,7 @@ def test_resilient_backend_retries_and_recovers() -> None:
 
 
 def test_resilient_backend_opens_circuit_after_threshold() -> None:
-    telemetry = _CapturingTelemetrySink()
+    telemetry = InMemoryTelemetrySink()
     wrapped = ResilientSearchBackend(
         _FlakyBackend(failures=10),
         name="azure",
@@ -218,3 +212,43 @@ def test_resilient_backend_opens_circuit_after_threshold() -> None:
 
     assert wrapped.state == "open"
     assert any(event["event_type"] == "circuit_open" for event in telemetry.events)
+
+
+def test_gateway_bootstrap_wraps_raw_backends_and_requires_telemetry_in_prod() -> None:
+    dev_service = build_search_gateway_service(
+        azure_backend=_FakeBackend({"results": [{"id": "1"}]}),
+        elastic_backend=_FakeBackend({"results": [{"id": "1"}]}),
+        config=GatewayRuntimeConfig(environment="dev", mode=TrafficMode.SHADOW),
+    )
+
+    assert isinstance(dev_service._azure, ResilientSearchBackend)
+    assert isinstance(dev_service._elastic, ResilientSearchBackend)
+
+    with pytest.raises(ValueError):
+        build_search_gateway_service(
+            azure_backend=_FakeBackend({"results": [{"id": "1"}]}),
+            elastic_backend=_FakeBackend({"results": [{"id": "1"}]}),
+            config=GatewayRuntimeConfig(environment="prod"),
+        )
+
+
+def test_gateway_emits_metrics_for_shadow_mismatch() -> None:
+    telemetry = InMemoryTelemetrySink()
+    service = SearchGatewayService(
+        azure_backend=_FakeBackend({"results": [{"id": "1"}, {"id": "2"}]}),
+        elastic_backend=_FakeBackend({"results": [{"id": "2"}, {"id": "3"}]}),
+        mode=TrafficMode.SHADOW,
+        telemetry_sink=telemetry,
+    )
+
+    asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold", "trace_id": "trace-1"},
+        )
+    )
+
+    assert any(event["event_type"] == "search.gateway.request.start" for event in telemetry.events)
+    assert telemetry.counters[("search.shadow.order_mismatch", (("entity_type", "customerDocument"),))] == 1

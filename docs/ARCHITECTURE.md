@@ -30,12 +30,20 @@ The projection builder solves the incomplete-projection problem by:
 - applying dependency rules
 - refusing to publish when required fragments are missing or stale
 - incrementing a projection version only when the materialized document changes
+- mutating one logical entity under one store-controlled boundary instead of a multi-call read/modify/write sequence
 
 The builder now depends on a `ProjectionStateStore` contract. The repo includes:
 
 - `InMemoryProjectionStateStore` for fast local tests
 - `SqliteProjectionStateStore` as a durable local control-plane implementation
 - `SpannerProjectionStateStore` as the production-oriented control-plane implementation path, including explicit Spanner DDL for fragments and projection state
+
+The store contract now supports entity-level mutation. That means:
+
+- the builder hands one logical entity mutation to the store
+- the store owns atomicity and revision updates
+- local runs use a lock-backed in-memory store
+- durable runs use SQLite or Spanner transaction boundaries
 
 The production path is to implement the same contract on Spanner or an equivalently durable control-plane store.
 
@@ -70,6 +78,7 @@ The gateway also now supports:
 - operational shadow quality gates
 - telemetry-ready events when ranking quality falls below threshold
 - resilient backend wrappers for timeout, retry, and circuit-breaker behavior
+- bootstrap-time enforcement so production startup does not silently use raw backends or no-op telemetry
 
 ### Search evaluation
 
@@ -98,9 +107,18 @@ The repo also includes a bucketed anti-entropy layer that:
 
 - hashes documents into deterministic buckets
 - compares bucket digests before comparing individual documents
-- drills into only mismatched buckets when detailed document fingerprints are available
+- recursively refines only mismatched buckets when detailed document fingerprints are available
 
-The next production extension should add multi-level bucket recursion or Merkle-tree style validation for very large domains.
+This is intentionally Merkle-like rather than a naive full-snapshot compare. The next production extension is to back this with a remote digest API so even drill-down fingerprint transfer stays bounded.
+
+## Operational wrappers
+
+The repo now includes operational scaffolding around the core architecture:
+
+- `projection/runtime.py` adds backpressure control and dead-letter handling around projection mutation
+- `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
+- `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
+- `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions
 
 ## Production evolution path
 
