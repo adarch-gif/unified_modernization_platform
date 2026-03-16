@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 
 import yaml
@@ -17,11 +18,19 @@ class DomainRoutingConfig(BaseModel):
     dedicated_tenants: list[str] = Field(default_factory=list)
 
 
+class TargetStore(StrEnum):
+    SPANNER = "spanner"
+    ELASTICSEARCH = "elasticsearch"
+    AZURE_AI_SEARCH = "azure_ai_search"
+    FIRESTORE = "firestore"
+    BIGQUERY = "bigquery"
+
+
 class DomainConfig(BaseModel):
     name: str
     entity_type: str
     current_source: str
-    target_store: str
+    target_store: TargetStore
     routing: DomainRoutingConfig = Field(default_factory=DomainRoutingConfig)
     projection_policy: ProjectionPolicyConfig = Field(default_factory=ProjectionPolicyConfig)
 

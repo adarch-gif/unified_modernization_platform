@@ -256,8 +256,13 @@ def _percentile(values: Sequence[float], percentile: int) -> float:
         return 0.0
     if len(values) == 1:
         return values[0]
-    index = max(0, min(len(values) - 1, round((percentile / 100) * (len(values) - 1))))
-    return values[index]
+    position = max(0.0, min(float(len(values) - 1), (percentile / 100) * (len(values) - 1)))
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    if lower_index == upper_index:
+        return values[lower_index]
+    fraction = position - lower_index
+    return values[lower_index] + (values[upper_index] - values[lower_index]) * fraction
 
 
 if __name__ == "__main__":

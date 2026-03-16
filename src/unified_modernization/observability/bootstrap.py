@@ -41,6 +41,7 @@ def build_telemetry_sink(
             service_name=config.service_name,
             collector_endpoint=config.otlp_collector_endpoint,
             headers=config.otlp_headers,
+            register_global_providers=True,
         )
     raise ValueError(f"unsupported telemetry mode {config.mode!r}")
 

@@ -280,11 +280,23 @@ class SqliteProjectionStateStore:
                     domain_name TEXT NOT NULL,
                     entity_type TEXT NOT NULL,
                     logical_entity_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending_required_fragment',
                     payload_json TEXT NOT NULL,
                     PRIMARY KEY (tenant_id, domain_name, entity_type, logical_entity_id)
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(projection_states)").fetchall()
+            }
+            if "status" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE projection_states
+                    ADD COLUMN status TEXT NOT NULL DEFAULT 'pending_required_fragment'
+                    """
+                )
 
     def _conn(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
@@ -367,12 +379,12 @@ class SqliteProjectionStateStore:
         connection.execute(
             """
             INSERT INTO projection_states (
-                tenant_id, domain_name, entity_type, logical_entity_id, payload_json
-            ) VALUES (?, ?, ?, ?, ?)
+                tenant_id, domain_name, entity_type, logical_entity_id, status, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, domain_name, entity_type, logical_entity_id)
-            DO UPDATE SET payload_json = excluded.payload_json
+            DO UPDATE SET status = excluded.status, payload_json = excluded.payload_json
             """,
-            (*self._params(key), entity.state.model_dump_json()),
+            (*self._params(key), entity.state.status.value, entity.state.model_dump_json()),
         )
 
     def get_fragments(self, key: ProjectionKey) -> dict[str, FragmentRecord]:
@@ -447,14 +459,16 @@ class SqliteProjectionStateStore:
 
     def pending_count(self) -> int:
         with self._lock:
-            rows = self._conn().execute("SELECT payload_json FROM projection_states").fetchall()
             terminal = _terminal_states()
-            pending = 0
-            for row in rows:
-                state = ProjectionStateRecord.model_validate_json(row["payload_json"])
-                if state.status not in terminal:
-                    pending += 1
-            return pending
+            row = self._conn().execute(
+                """
+                SELECT COUNT(*) AS pending_count
+                FROM projection_states
+                WHERE status != ? AND status != ?
+                """,
+                tuple(status.value for status in terminal),
+            ).fetchone()
+            return 0 if row is None else int(row["pending_count"])
 
 
 class SpannerProjectionStateStore:

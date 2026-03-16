@@ -136,6 +136,7 @@ class OpenTelemetryTelemetrySink:
         service_name: str,
         collector_endpoint: str,
         headers: Mapping[str, str] | None = None,
+        register_global_providers: bool = False,
     ) -> "OpenTelemetryTelemetrySink":
         from opentelemetry import metrics, trace
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -168,11 +169,17 @@ class OpenTelemetryTelemetrySink:
             ],
             resource=resource,
         )
-        trace.set_tracer_provider(tracer_provider)
-        metrics.set_meter_provider(meter_provider)
+        if register_global_providers:
+            trace.set_tracer_provider(tracer_provider)
+            metrics.set_meter_provider(meter_provider)
+            tracer = trace.get_tracer(service_name)
+            meter = metrics.get_meter(service_name)
+        else:
+            tracer = tracer_provider.get_tracer(service_name)
+            meter = meter_provider.get_meter(service_name)
         return cls(
-            tracer=trace.get_tracer(service_name),
-            meter=metrics.get_meter(service_name),
+            tracer=tracer,
+            meter=meter,
         )
 
 

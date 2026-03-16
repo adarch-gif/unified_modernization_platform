@@ -72,7 +72,12 @@ class ProjectionBuilder:
 
     def upsert(self, event: CanonicalDomainEvent, now_utc: datetime | None = None) -> PublicationDecision:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
-        policy = self._resolve_policy(domain_name=event.domain_name, entity_type=event.entity_type)
+        try:
+            policy = self._resolve_policy(domain_name=event.domain_name, entity_type=event.entity_type)
+        except KeyError as exc:
+            raise ValueError(
+                f"no dependency policy configured for domain={event.domain_name!r}, entity_type={event.entity_type!r}"
+            ) from exc
         key = self._projection_key(event)
 
         incoming = FragmentRecord(
@@ -129,6 +134,65 @@ class ProjectionBuilder:
                 now=now,
             )
         return result.decision
+
+    def quarantine(
+        self,
+        tenant_id: str,
+        domain_name: str,
+        entity_type: str,
+        logical_entity_id: str,
+        *,
+        reason: str,
+        now_utc: datetime | None = None,
+        trace_id: str | None = None,
+    ) -> ProjectionStateRecord:
+        now = (now_utc or datetime.now(UTC)).astimezone(UTC)
+        key = ProjectionKey(
+            tenant_id=tenant_id,
+            domain_name=domain_name,
+            entity_type=entity_type,
+            logical_entity_id=logical_entity_id,
+        )
+
+        def mutator(entity: ProjectionEntityRecord) -> ProjectionMutationResult:
+            state = entity.state or ProjectionStateRecord(
+                tenant_id=tenant_id,
+                domain_name=domain_name,
+                entity_type=entity_type,
+                logical_entity_id=logical_entity_id,
+                status=ProjectionStatus.QUARANTINED,
+                reason_code="quarantined",
+            )
+            state.status = ProjectionStatus.QUARANTINED
+            state.reason_code = "quarantined"
+            state.quarantine_reason = reason
+            state.quarantine_at_utc = now
+            entity.state = state
+            return ProjectionMutationResult(
+                entity=entity,
+                decision=PublicationDecision(publish=False, state=state),
+            )
+
+        result = self._state_store.mutate_entity(key, mutator)
+        self._telemetry_sink.increment(
+            "projection.quarantined",
+            tags={"domain_name": domain_name, "entity_type": entity_type},
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="projection_quarantined",
+                severity="warning",
+                trace_id=trace_id,
+                attributes={
+                    "tenant_id": tenant_id,
+                    "domain_name": domain_name,
+                    "entity_type": entity_type,
+                    "logical_entity_id": logical_entity_id,
+                    "reason": reason,
+                },
+            )
+        )
+        return result.decision.state
 
     def _capture_and_mutate_entity(
         self,

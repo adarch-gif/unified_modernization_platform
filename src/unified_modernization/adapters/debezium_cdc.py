@@ -83,6 +83,8 @@ def _parse_debezium_change_type(value: str) -> ChangeType:
         return ChangeType.DELETE
     if normalized == "r":
         return ChangeType.REFRESH
+    if normalized == "t":
+        raise ValueError("Debezium TRUNCATE events must be handled at the pipeline level")
     return ChangeType.UPSERT
 
 
@@ -101,12 +103,12 @@ def _parse_source_version(
             if digits:
                 return int(digits)
 
-    for fallback_field in ("ts_ms", "ts_us", "ts_ns"):
+    for fallback_field, divisor in (("ts_ms", 1), ("ts_us", 1000), ("ts_ns", 1_000_000)):
         candidate = payload.get(fallback_field) or source.get(fallback_field)
         if isinstance(candidate, int):
-            return candidate
+            return candidate // divisor
         if isinstance(candidate, str) and candidate.strip():
-            return int(candidate)
+            return int(candidate) // divisor
 
     raise ValueError("Debezium record must contain a numeric source version")
 
@@ -117,4 +119,4 @@ def _parse_debezium_event_time(payload: Mapping[str, object]) -> datetime:
         return datetime.fromtimestamp(raw_time / 1000, tz=UTC)
     if isinstance(raw_time, str) and raw_time.strip():
         return datetime.fromtimestamp(int(raw_time) / 1000, tz=UTC)
-    return datetime.now(UTC)
+    raise ValueError("Debezium record missing ts_ms; cannot determine event time")

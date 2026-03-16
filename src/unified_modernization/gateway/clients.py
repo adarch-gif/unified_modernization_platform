@@ -70,7 +70,7 @@ class AzureAISearchBackend:
         headers = {"Content-Type": "application/json"}
         if self._config.api_key:
             headers["api-key"] = self._config.api_key
-        if self._config.bearer_token:
+        elif self._config.bearer_token:
             headers["Authorization"] = f"Bearer {self._config.bearer_token}"
         if trace_id:
             headers["x-ms-client-request-id"] = trace_id
@@ -158,7 +158,7 @@ class ElasticsearchSearchBackend:
         headers = {"Content-Type": "application/json"}
         if self._config.api_key:
             headers["Authorization"] = f"ApiKey {self._config.api_key}"
-        if self._config.bearer_token:
+        elif self._config.bearer_token:
             headers["Authorization"] = f"Bearer {self._config.bearer_token}"
         if trace_id:
             headers["X-Opaque-Id"] = trace_id

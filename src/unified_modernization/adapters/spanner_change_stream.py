@@ -12,6 +12,8 @@ from unified_modernization.contracts.events import (
     SourceTechnology,
 )
 
+_INT64_MAX = (1 << 63) - 1
+
 
 class SpannerChangeStreamAdapterConfig(BaseModel):
     domain_name: str
@@ -88,11 +90,16 @@ def _require_str(value: object, *, field_name: str) -> str:
 
 def _parse_record_sequence(value: object) -> int:
     if isinstance(value, int):
+        if value > _INT64_MAX:
+            raise ValueError("record_sequence exceeds int64 maximum")
         return value
     if isinstance(value, str) and value.strip():
         digits = "".join(char for char in value if char.isdigit())
         if digits:
-            return int(digits)
+            parsed = int(digits)
+            if parsed > _INT64_MAX:
+                raise ValueError("record_sequence exceeds int64 maximum")
+            return parsed
     raise ValueError("record_sequence must be numeric or contain digits")
 
 

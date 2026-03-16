@@ -97,9 +97,11 @@ class _FakeBackend:
     def __init__(self, response: dict) -> None:
         self.response = response
         self.last_request: dict | None = None
+        self.calls = 0
 
     async def query(self, request: dict) -> dict:
         self.last_request = request
+        self.calls += 1
         return self.response
 
 
@@ -438,3 +440,29 @@ def test_canary_frozen_mode_routes_back_to_azure_primary() -> None:
     )
 
     assert response["results"][0]["id"] == "azure-doc"
+
+
+def test_canary_shadow_observation_can_be_sampled_out() -> None:
+    azure = _FakeBackend({"results": [{"id": "azure-doc"}]})
+    elastic = _FakeBackend({"results": [{"id": "elastic-doc"}]})
+    service = SearchGatewayService(
+        azure_backend=azure,
+        elastic_backend=elastic,
+        mode=TrafficMode.CANARY,
+        canary_percent=0,
+        shadow_observation_percent=0,
+    )
+
+    response = asyncio.run(
+        service.search(
+            consumer_id="consumer-1",
+            tenant_id="tenant-a",
+            entity_type="customerDocument",
+            raw_params={"$search": "gold"},
+        )
+    )
+
+    assert response["results"][0]["id"] == "azure-doc"
+    assert azure.calls == 1
+    assert elastic.calls == 0
+    assert service.last_shadow_comparison is None

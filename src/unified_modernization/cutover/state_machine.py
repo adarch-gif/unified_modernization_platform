@@ -84,6 +84,9 @@ class FirestoreDocumentReferenceProtocol(Protocol):
     def set(self, document_data: dict[str, object]) -> None:
         raise NotImplementedError
 
+    def get(self) -> FirestoreDocumentSnapshotProtocol:
+        raise NotImplementedError
+
 
 class FirestoreCollectionProtocol(Protocol):
     def document(self, document_id: str | None = None) -> FirestoreDocumentReferenceProtocol:
@@ -182,37 +185,36 @@ class FirestoreCutoverStateStore:
         self._collection_prefix = collection_prefix
 
     def append(self, event: CutoverTransitionEvent) -> None:
-        collection = self._client.collection(self._collection_name(event.domain_name))
-        collection.document().set(event.model_dump(mode="json"))
+        events_collection = self._client.collection(self._events_collection_name(event.domain_name))
+        events_collection.document().set(event.model_dump(mode="json"))
+        latest_state = self.load_latest(event.domain_name) or PersistedCutoverState(
+            domain_name=event.domain_name,
+            backend_state=BackendPrimaryState.AZURE_PRIMARY,
+            search_state=SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK,
+            updated_at_utc=event.timestamp_utc,
+        )
+        if event.track == "backend":
+            latest_state.backend_state = BackendPrimaryState(event.to_state)
+        elif event.track == "search":
+            latest_state.search_state = SearchServingState(event.to_state)
+        latest_state.updated_at_utc = event.timestamp_utc
+        latest_collection = self._client.collection(self._state_collection_name(event.domain_name))
+        latest_collection.document("latest").set(latest_state.model_dump(mode="json"))
 
     def load_latest(self, domain_name: str) -> PersistedCutoverState | None:
-        collection = self._client.collection(self._collection_name(domain_name))
-        events = [
-            CutoverTransitionEvent.model_validate(snapshot.to_dict() or {})
-            for snapshot in collection.stream()
-            if snapshot.to_dict()
-        ]
-        if not events:
+        latest_collection = self._client.collection(self._state_collection_name(domain_name))
+        payload = latest_collection.document("latest").get().to_dict()
+        if not payload:
             return None
-        events.sort(key=lambda item: item.timestamp_utc)
-        backend_state = BackendPrimaryState.AZURE_PRIMARY
-        search_state = SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK
-        updated_at = events[-1].timestamp_utc
-        for event in events:
-            if event.track == "backend":
-                backend_state = BackendPrimaryState(event.to_state)
-            elif event.track == "search":
-                search_state = SearchServingState(event.to_state)
-        return PersistedCutoverState(
-            domain_name=domain_name,
-            backend_state=backend_state,
-            search_state=search_state,
-            updated_at_utc=updated_at,
-        )
+        return PersistedCutoverState.model_validate(payload)
 
-    def _collection_name(self, domain_name: str) -> str:
+    def _events_collection_name(self, domain_name: str) -> str:
         sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", domain_name)
-        return f"{self._collection_prefix}__{sanitized}"
+        return f"{self._collection_prefix}__{sanitized}__events"
+
+    def _state_collection_name(self, domain_name: str) -> str:
+        sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", domain_name)
+        return f"{self._collection_prefix}__{sanitized}__state"
 
 
 class DomainMigrationState:

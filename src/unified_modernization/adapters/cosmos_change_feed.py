@@ -66,11 +66,10 @@ class CosmosChangeFeedAdapter:
 
 
 def _strip_system_fields(record: Mapping[str, Any], *, excluded_fields: set[str]) -> dict[str, Any]:
-    system_prefixes = {"_", "_attachments"}
     return {
         key: value
         for key, value in record.items()
-        if key not in excluded_fields and not any(key.startswith(prefix) for prefix in system_prefixes)
+        if key not in excluded_fields and not key.startswith("_")
     }
 
 
@@ -83,8 +82,12 @@ def _require_str(value: object, *, field_name: str) -> str:
 def _parse_int(value: object, *, field_name: str) -> int:
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, float) and value.is_integer():
         return int(value)
+    if isinstance(value, str) and value.strip():
+        parsed = float(value)
+        if parsed.is_integer():
+            return int(parsed)
     raise ValueError(f"{field_name} must be an integer")
 
 

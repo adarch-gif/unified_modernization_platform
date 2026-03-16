@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from unified_modernization.adapters.cosmos_change_feed import CosmosChangeFeedAdapter, CosmosChangeFeedAdapterConfig
 from unified_modernization.adapters.debezium_cdc import DebeziumChangeEventAdapter, DebeziumChangeEventAdapterConfig
@@ -236,6 +237,105 @@ def test_elasticsearch_document_publisher_deletes_with_external_versioning() -> 
     assert result["result"] == "deleted"
 
 
+def test_elasticsearch_document_publisher_supports_async_publish() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(201, json={"result": "created"})
+
+    async def run_test() -> dict[str, object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            publisher = ElasticsearchDocumentPublisher(
+                ElasticsearchPublisherConfig(endpoint="https://elastic.example.com", api_key="elastic-key"),
+                async_client=client,
+                tenant_policy_engine=TenantPolicyEngine(dedicated_tenants={"tenant-a"}),
+                telemetry_sink=InMemoryTelemetrySink(),
+            )
+            return await publisher.publish_async(
+                SearchDocument(
+                    document_id="doc-async",
+                    tenant_id="tenant-a",
+                    domain_name="customer_documents",
+                    entity_type="customerDocument",
+                    projection_version=9,
+                    completeness_status=CompletenessStatus.COMPLETE,
+                    source_versions={"document_core": 21},
+                    payload={"title": "Async publish"},
+                ),
+                trace_id="trace-async",
+            )
+
+    result = asyncio.run(run_test())
+
+    assert captured["method"] == "PUT"
+    assert "customerDocument-tenant-a-write/_doc/doc-async" in str(captured["url"])
+    assert result["result"] == "created"
+
+
+def test_elasticsearch_document_publisher_surfaces_bulk_item_failures() -> None:
+    payload = {
+        "errors": True,
+        "items": [
+            {"index": {"_id": "doc-1", "status": 201}},
+            {
+                "index": {
+                    "_id": "doc-2",
+                    "status": 409,
+                    "error": {"type": "version_conflict_engine_exception"},
+                }
+            },
+        ],
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    telemetry = InMemoryTelemetrySink()
+    publisher = ElasticsearchDocumentPublisher(
+        ElasticsearchPublisherConfig(endpoint="https://elastic.example.com"),
+        client=client,
+        telemetry_sink=telemetry,
+    )
+
+    result = publisher.publish_many(
+        [
+            SearchDocument(
+                document_id="doc-1",
+                tenant_id="tenant-a",
+                domain_name="customer_documents",
+                entity_type="customerDocument",
+                projection_version=1,
+                completeness_status=CompletenessStatus.COMPLETE,
+                source_versions={"document_core": 1},
+                payload={"title": "ok"},
+            ),
+            SearchDocument(
+                document_id="doc-2",
+                tenant_id="tenant-a",
+                domain_name="customer_documents",
+                entity_type="customerDocument",
+                projection_version=2,
+                completeness_status=CompletenessStatus.COMPLETE,
+                source_versions={"document_core": 2},
+                payload={"title": "conflict"},
+            ),
+        ],
+        trace_id="trace-bulk",
+    )
+
+    client.close()
+
+    assert result["errors"] is True
+    assert result["failed_document_ids"] == ["doc-2"]
+    assert result["failed_items"][0]["status"] == 409
+    assert telemetry.counters[("projection.publisher.bulk_failures", ())] == 1
+
+
 def test_projection_runtime_publishes_documents_when_publisher_is_configured() -> None:
     class _CapturingPublisher:
         def __init__(self) -> None:
@@ -392,6 +492,28 @@ def test_cosmos_change_feed_adapter_normalizes_delete_record() -> None:
     assert event.source_version == 42
 
 
+def test_cosmos_change_feed_adapter_accepts_integer_valued_float_lsn() -> None:
+    adapter = CosmosChangeFeedAdapter(
+        CosmosChangeFeedAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="document_core",
+        )
+    )
+
+    event = adapter.normalize(
+        {
+            "id": "doc-float-lsn",
+            "tenantId": "tenant-a",
+            "_lsn": 42.0,
+            "_ts": 1_710_000_000,
+            "title": "Float LSN",
+        }
+    )
+
+    assert event.source_version == 42
+
+
 def test_debezium_change_event_adapter_normalizes_upsert() -> None:
     adapter = DebeziumChangeEventAdapter(
         DebeziumChangeEventAdapterConfig(
@@ -456,6 +578,95 @@ def test_debezium_change_event_adapter_uses_before_image_for_deletes() -> None:
     assert event.source_version == 161239
 
 
+def test_debezium_change_event_adapter_normalizes_timestamp_fallbacks_to_millis() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+            source_version_field=None,
+        )
+    )
+
+    microsecond_event = adapter.normalize(
+        {
+            "payload": {
+                "op": "u",
+                "ts_ms": 1_710_000_000_000,
+                "ts_us": 1_710_000_000_000_000,
+                "after": {
+                    "id": "doc-us",
+                    "tenant_id": "tenant-a",
+                },
+            }
+        }
+    )
+    nanosecond_event = adapter.normalize(
+        {
+            "payload": {
+                "op": "u",
+                "ts_ms": 1_710_000_000_000,
+                "ts_ns": 1_710_000_000_000_000_000,
+                "after": {
+                    "id": "doc-ns",
+                    "tenant_id": "tenant-a",
+                },
+            }
+        }
+    )
+
+    assert microsecond_event.source_version == 1_710_000_000_000
+    assert nanosecond_event.source_version == 1_710_000_000_000
+
+
+def test_debezium_change_event_adapter_rejects_truncate_records() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+        )
+    )
+
+    with pytest.raises(ValueError, match="TRUNCATE"):
+        adapter.normalize(
+            {
+                "payload": {
+                    "op": "t",
+                    "ts_ms": 1_710_000_000_000,
+                    "after": {
+                        "id": "doc-truncate",
+                        "tenant_id": "tenant-a",
+                    },
+                }
+            }
+        )
+
+
+def test_debezium_change_event_adapter_rejects_missing_event_time() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+        )
+    )
+
+    with pytest.raises(ValueError, match="missing ts_ms"):
+        adapter.normalize(
+            {
+                "payload": {
+                    "op": "u",
+                    "source": {"lsn": 12345},
+                    "after": {
+                        "id": "doc-no-time",
+                        "tenant_id": "tenant-a",
+                    },
+                }
+            }
+        )
+
+
 def test_spanner_change_stream_adapter_normalizes_update_record() -> None:
     adapter = SpannerChangeStreamAdapter(
         SpannerChangeStreamAdapterConfig(
@@ -483,3 +694,28 @@ def test_spanner_change_stream_adapter_normalizes_update_record() -> None:
     assert event.change_type == ChangeType.UPSERT
     assert event.source_version == 12345
     assert event.payload["title"] == "From Spanner"
+
+
+def test_spanner_change_stream_adapter_rejects_record_sequence_over_int64() -> None:
+    adapter = SpannerChangeStreamAdapter(
+        SpannerChangeStreamAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="document_core",
+        )
+    )
+
+    with pytest.raises(ValueError, match="int64 maximum"):
+        adapter.normalize(
+            {
+                "mod_type": "UPDATE",
+                "record_sequence": str(2**63),
+                "commit_timestamp": "2026-03-16T12:00:00Z",
+                "keys": {"id": "doc-overflow", "tenant_id": "tenant-a"},
+                "new_values": {
+                    "id": "doc-overflow",
+                    "tenant_id": "tenant-a",
+                    "title": "Too large",
+                },
+            }
+        )

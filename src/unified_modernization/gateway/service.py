@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from enum import StrEnum
+import threading
 from typing import Any, Protocol
 
 from unified_modernization.gateway.evaluation import (
@@ -54,6 +55,7 @@ class SearchGatewayService:
         mode: TrafficMode = TrafficMode.AZURE_ONLY,
         canary_percent: int = 0,
         auto_disable_canary_on_regression: bool = True,
+        shadow_observation_percent: int = 100,
     ) -> None:
         self._azure = azure_backend
         self._elastic = elastic_backend
@@ -66,10 +68,52 @@ class SearchGatewayService:
         self._mode = mode
         self._canary_percent = canary_percent
         self._auto_disable_canary_on_regression = auto_disable_canary_on_regression
-        self.canary_frozen = False
-        self.last_canary_freeze_event: dict[str, Any] | None = None
-        self.last_shadow_comparison: dict[str, Any] | None = None
-        self.last_shadow_quality_gate: dict[str, Any] | None = None
+        self._shadow_observation_percent = shadow_observation_percent
+        self._state_lock = threading.RLock()
+        self._canary_frozen = False
+        self._last_canary_freeze_event: dict[str, Any] | None = None
+        self._last_shadow_comparison: dict[str, Any] | None = None
+        self._last_shadow_quality_gate: dict[str, Any] | None = None
+
+    @property
+    def last_shadow_comparison(self) -> dict[str, Any] | None:
+        with self._state_lock:
+            return None if self._last_shadow_comparison is None else dict(self._last_shadow_comparison)
+
+    @last_shadow_comparison.setter
+    def last_shadow_comparison(self, value: dict[str, Any] | None) -> None:
+        with self._state_lock:
+            self._last_shadow_comparison = None if value is None else dict(value)
+
+    @property
+    def last_shadow_quality_gate(self) -> dict[str, Any] | None:
+        with self._state_lock:
+            return None if self._last_shadow_quality_gate is None else dict(self._last_shadow_quality_gate)
+
+    @last_shadow_quality_gate.setter
+    def last_shadow_quality_gate(self, value: dict[str, Any] | None) -> None:
+        with self._state_lock:
+            self._last_shadow_quality_gate = None if value is None else dict(value)
+
+    @property
+    def canary_frozen(self) -> bool:
+        with self._state_lock:
+            return self._canary_frozen
+
+    @canary_frozen.setter
+    def canary_frozen(self, value: bool) -> None:
+        with self._state_lock:
+            self._canary_frozen = value
+
+    @property
+    def last_canary_freeze_event(self) -> dict[str, Any] | None:
+        with self._state_lock:
+            return None if self._last_canary_freeze_event is None else dict(self._last_canary_freeze_event)
+
+    @last_canary_freeze_event.setter
+    def last_canary_freeze_event(self, value: dict[str, Any] | None) -> None:
+        with self._state_lock:
+            self._last_canary_freeze_event = None if value is None else dict(value)
 
     async def search(
         self,
@@ -133,6 +177,9 @@ class SearchGatewayService:
             if self._mode == TrafficMode.CANARY and self.canary_frozen:
                 self._telemetry_sink.increment("search.gateway.canary_frozen", tags={"backend": "azure"})
                 primary = await self._azure.query(azure_request)
+                if not self._should_observe_shadow(tenant_id=tenant_id, consumer_id=consumer_id, entity_type=entity_type):
+                    self._telemetry_sink.increment("search.gateway.shadow_sampled_out", tags={"mode": self._mode.value})
+                    return primary
                 try:
                     elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
                     shadow = await self._elastic.query(elastic_request)
@@ -160,6 +207,9 @@ class SearchGatewayService:
                 self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "elastic"})
                 elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
                 canary_response = await self._elastic.query(elastic_request)
+                if not self._should_observe_shadow(tenant_id=tenant_id, consumer_id=consumer_id, entity_type=entity_type):
+                    self._telemetry_sink.increment("search.gateway.shadow_sampled_out", tags={"mode": self._mode.value})
+                    return canary_response
                 try:
                     azure_shadow = await self._azure.query(azure_request)
                 except Exception as exc:
@@ -184,6 +234,9 @@ class SearchGatewayService:
                 return canary_response
             self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "azure"})
             primary = await self._azure.query(azure_request)
+            if not self._should_observe_shadow(tenant_id=tenant_id, consumer_id=consumer_id, entity_type=entity_type):
+                self._telemetry_sink.increment("search.gateway.shadow_sampled_out", tags={"mode": self._mode.value})
+                return primary
             try:
                 elastic_request = self._build_elastic_request(tenant_id, entity_type, raw_params)
                 shadow = await self._elastic.query(elastic_request)
@@ -211,6 +264,13 @@ class SearchGatewayService:
 
     def _bucket(self, consumer_id: str) -> int:
         return int(hashlib.md5(consumer_id.encode("utf-8"), usedforsecurity=False).hexdigest(), 16) % 100
+
+    def _should_observe_shadow(self, *, tenant_id: str, consumer_id: str, entity_type: str) -> bool:
+        if self._shadow_observation_percent >= 100:
+            return True
+        if self._shadow_observation_percent <= 0:
+            return False
+        return self._bucket(f"shadow:{tenant_id}:{consumer_id}:{entity_type}") < self._shadow_observation_percent
 
     def _build_elastic_request(self, tenant_id: str, entity_type: str, raw_params: dict[str, str]) -> dict[str, Any]:
         policy = self._tenant_policy_engine.resolve(tenant_id, entity_type)

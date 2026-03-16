@@ -27,6 +27,7 @@ class GatewayRuntimeConfig(BaseModel):
     mode: TrafficMode = TrafficMode.AZURE_ONLY
     canary_percent: int = Field(default=0, ge=0, le=100)
     auto_disable_canary_on_regression: bool = True
+    shadow_observation_percent: int = Field(default=25, ge=0, le=100)
     azure_timeout_seconds: float = Field(default=2.0, gt=0)
     elastic_timeout_seconds: float = Field(default=1.0, gt=0)
     max_retries: int = Field(default=2, ge=0)
@@ -123,6 +124,7 @@ def build_search_gateway_service(
         mode=config.mode,
         canary_percent=config.canary_percent,
         auto_disable_canary_on_regression=config.auto_disable_canary_on_regression,
+        shadow_observation_percent=config.shadow_observation_percent,
     )
 
 
@@ -160,16 +162,41 @@ def load_gateway_integration_config_from_env(
     return GatewayIntegrationConfig(
         runtime=GatewayRuntimeConfig(
             environment=source.get(f"{prefix}ENVIRONMENT", "dev").strip().lower(),
-            mode=TrafficMode(source.get(f"{prefix}GATEWAY_MODE", TrafficMode.AZURE_ONLY.value).strip().lower()),
-            canary_percent=int(source.get(f"{prefix}GATEWAY_CANARY_PERCENT", "0")),
+            mode=_parse_mode(
+                source.get(f"{prefix}GATEWAY_MODE", TrafficMode.AZURE_ONLY.value),
+                field_name=f"{prefix}GATEWAY_MODE",
+            ),
+            canary_percent=_parse_int(
+                source.get(f"{prefix}GATEWAY_CANARY_PERCENT", "0"),
+                field_name=f"{prefix}GATEWAY_CANARY_PERCENT",
+            ),
             auto_disable_canary_on_regression=_parse_bool(
                 source.get(f"{prefix}GATEWAY_AUTO_DISABLE_CANARY_ON_REGRESSION", "true")
             ),
-            azure_timeout_seconds=float(source.get(f"{prefix}GATEWAY_AZURE_TIMEOUT_SECONDS", "2.0")),
-            elastic_timeout_seconds=float(source.get(f"{prefix}GATEWAY_ELASTIC_TIMEOUT_SECONDS", "1.0")),
-            max_retries=int(source.get(f"{prefix}GATEWAY_MAX_RETRIES", "2")),
-            failure_threshold=int(source.get(f"{prefix}GATEWAY_FAILURE_THRESHOLD", "5")),
-            recovery_timeout_seconds=float(source.get(f"{prefix}GATEWAY_RECOVERY_TIMEOUT_SECONDS", "30.0")),
+            shadow_observation_percent=_parse_int(
+                source.get(f"{prefix}GATEWAY_SHADOW_OBSERVATION_PERCENT", "25"),
+                field_name=f"{prefix}GATEWAY_SHADOW_OBSERVATION_PERCENT",
+            ),
+            azure_timeout_seconds=_parse_float(
+                source.get(f"{prefix}GATEWAY_AZURE_TIMEOUT_SECONDS", "2.0"),
+                field_name=f"{prefix}GATEWAY_AZURE_TIMEOUT_SECONDS",
+            ),
+            elastic_timeout_seconds=_parse_float(
+                source.get(f"{prefix}GATEWAY_ELASTIC_TIMEOUT_SECONDS", "1.0"),
+                field_name=f"{prefix}GATEWAY_ELASTIC_TIMEOUT_SECONDS",
+            ),
+            max_retries=_parse_int(
+                source.get(f"{prefix}GATEWAY_MAX_RETRIES", "2"),
+                field_name=f"{prefix}GATEWAY_MAX_RETRIES",
+            ),
+            failure_threshold=_parse_int(
+                source.get(f"{prefix}GATEWAY_FAILURE_THRESHOLD", "5"),
+                field_name=f"{prefix}GATEWAY_FAILURE_THRESHOLD",
+            ),
+            recovery_timeout_seconds=_parse_float(
+                source.get(f"{prefix}GATEWAY_RECOVERY_TIMEOUT_SECONDS", "30.0"),
+                field_name=f"{prefix}GATEWAY_RECOVERY_TIMEOUT_SECONDS",
+            ),
         ),
         azure=AzureGatewayBackendConfig(
             endpoint=_required_str(source.get(f"{prefix}AZURE_SEARCH_ENDPOINT"), field_name=f"{prefix}AZURE_SEARCH_ENDPOINT"),
@@ -250,3 +277,25 @@ def _required_str(value: str | None, *, field_name: str) -> str:
     if stripped is None:
         raise ValueError(f"{field_name} is required")
     return stripped
+
+
+def _parse_int(value: str | None, *, field_name: str) -> int:
+    try:
+        return int(_required_str(value, field_name=field_name))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+
+
+def _parse_float(value: str | None, *, field_name: str) -> float:
+    try:
+        return float(_required_str(value, field_name=field_name))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a float") from exc
+
+
+def _parse_mode(value: str | None, *, field_name: str) -> TrafficMode:
+    normalized = _required_str(value, field_name=field_name).strip().lower()
+    try:
+        return TrafficMode(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be one of: {', '.join(mode.value for mode in TrafficMode)}") from exc

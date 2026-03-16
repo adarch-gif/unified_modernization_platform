@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -71,9 +71,13 @@ class BackfillCoordinator:
         summary = BackfillExecutionSummary()
         start_from = checkpoint_store.load_position() if checkpoint_store is not None else 0
 
-        for index, event in enumerate(events):
-            if index < start_from:
-                continue
+        event_iterable: Iterable[tuple[int, CanonicalDomainEvent]]
+        if isinstance(events, Sequence):
+            event_iterable = enumerate(events[start_from:], start=start_from)
+        else:
+            event_iterable = ((index, event) for index, event in enumerate(events) if index >= start_from)
+
+        for index, event in event_iterable:
             summary.ingested_events += 1
             summary.last_event_time_utc = event.event_time_utc
             effective_now = fixed_now or datetime.now(UTC).astimezone(UTC)

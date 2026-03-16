@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, deque
 from collections.abc import Iterable
 from typing import Protocol
@@ -376,15 +377,20 @@ class BucketedReconciliationEngine:
         page_size: int = 1000,
         fanout: int = 16,
     ) -> ReconciliationReport:
+        source_buckets, target_buckets = self._fetch_bucket_digest_pair(
+            source_store,
+            target_store,
+            bucket_count=bucket_count,
+        )
         source_snapshot = BucketedStoreSnapshot(
             name="source",
             bucket_count=bucket_count,
-            buckets=source_store.fetch_bucket_digests(bucket_count=bucket_count),
+            buckets=source_buckets,
         )
         target_snapshot = BucketedStoreSnapshot(
             name="target",
             bucket_count=bucket_count,
-            buckets=target_store.fetch_bucket_digests(bucket_count=bucket_count),
+            buckets=target_buckets,
         )
         findings: list[ReconciliationFinding] = []
         mismatched_bucket_ids: list[str] = []
@@ -527,14 +533,10 @@ class BucketedReconciliationEngine:
                 target_bucket.active_count + target_bucket.deleted_count,
             )
             if bucket_depth >= max_recursive_depth or max_bucket_documents <= target_leaf_size:
-                source_documents = self._fetch_bucket_documents_remote(
+                source_documents, target_documents = self._fetch_bucket_document_pair(
                     source_store,
-                    bucket_id,
-                    page_size=page_size,
-                )
-                target_documents = self._fetch_bucket_documents_remote(
                     target_store,
-                    bucket_id,
+                    bucket_id=bucket_id,
                     page_size=page_size,
                 )
                 findings.extend(
@@ -546,13 +548,9 @@ class BucketedReconciliationEngine:
                 )
                 continue
 
-            source_children = source_store.fetch_bucket_digests(
-                bucket_count=fanout,
-                parent_bucket_id=bucket_id,
-                depth=bucket_depth,
-                fanout=fanout,
-            )
-            target_children = target_store.fetch_bucket_digests(
+            source_children, target_children = self._fetch_bucket_digest_pair(
+                source_store,
+                target_store,
                 bucket_count=fanout,
                 parent_bucket_id=bucket_id,
                 depth=bucket_depth,
@@ -595,6 +593,60 @@ class BucketedReconciliationEngine:
                     )
                 )
         return findings
+
+    def _fetch_bucket_digest_pair(
+        self,
+        source_store: RemoteBucketStore,
+        target_store: RemoteBucketStore,
+        *,
+        bucket_count: int,
+        parent_bucket_id: str | None = None,
+        depth: int = 0,
+        fanout: int = 16,
+    ) -> tuple[dict[str, BucketDigest], dict[str, BucketDigest]]:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(
+                lambda: source_store.fetch_bucket_digests(
+                    bucket_count=bucket_count,
+                    parent_bucket_id=parent_bucket_id,
+                    depth=depth,
+                    fanout=fanout,
+                )
+            )
+            target_future = executor.submit(
+                lambda: target_store.fetch_bucket_digests(
+                    bucket_count=bucket_count,
+                    parent_bucket_id=parent_bucket_id,
+                    depth=depth,
+                    fanout=fanout,
+                )
+            )
+            return source_future.result(), target_future.result()
+
+    def _fetch_bucket_document_pair(
+        self,
+        source_store: RemoteBucketStore,
+        target_store: RemoteBucketStore,
+        *,
+        bucket_id: str,
+        page_size: int,
+    ) -> tuple[dict[str, DocumentFingerprint], dict[str, DocumentFingerprint]]:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(
+                lambda: self._fetch_bucket_documents_remote(
+                    source_store,
+                    bucket_id,
+                    page_size=page_size,
+                )
+            )
+            target_future = executor.submit(
+                lambda: self._fetch_bucket_documents_remote(
+                    target_store,
+                    bucket_id,
+                    page_size=page_size,
+                )
+            )
+            return source_future.result(), target_future.result()
 
     def _compare_document_maps(
         self,

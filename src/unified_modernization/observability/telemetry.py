@@ -199,7 +199,12 @@ class StructuredLoggerTelemetrySink:
 
     def emit(self, event: TelemetryEvent | Mapping[str, Any]) -> None:
         normalized = InMemoryTelemetrySink._normalize_event(event)
-        self._logger.info("", extra={"json_fields": normalized.model_dump()})
+        payload = normalized.model_dump()
+        self._logger.info(
+            "telemetry %s",
+            normalized.model_dump_json(),
+            extra={"json_fields": payload},
+        )
 
     def increment(self, name: str, value: int = 1, *, tags: Mapping[str, str] | None = None) -> None:
         self.emit(

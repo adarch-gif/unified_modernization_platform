@@ -43,6 +43,21 @@ def test_translate_requires_api_key_in_prod() -> None:
     assert authorized.status_code == 200
 
 
+def test_translate_fails_closed_when_prod_api_keys_are_unconfigured() -> None:
+    app = build_app(
+        ASGIRuntimeConfig(
+            environment="prod",
+            valid_api_keys=set(),
+            field_map={"Status": "status"},
+        )
+    )
+    client = TestClient(app)
+
+    response = client.post("/translate", json={"params": {"$filter": "Status eq 'ACTIVE'"}})
+
+    assert response.status_code == 401
+
+
 def test_translate_rejects_unknown_fields_with_422() -> None:
     app = build_app(
         ASGIRuntimeConfig(

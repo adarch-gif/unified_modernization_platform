@@ -39,11 +39,15 @@ def test_cutover_state_rehydrates_from_persisted_store(tmp_path: Path) -> None:
 
 
 class _FakeFirestoreDocumentReference:
-    def __init__(self, documents: list[dict[str, object]]) -> None:
+    def __init__(self, documents: dict[str, dict[str, object]], document_id: str | None = None) -> None:
         self._documents = documents
+        self._document_id = document_id or f"doc-{len(documents) + 1}"
 
     def set(self, document_data: dict[str, object]) -> None:
-        self._documents.append(dict(document_data))
+        self._documents[self._document_id] = dict(document_data)
+
+    def get(self) -> "_FakeFirestoreSnapshot":
+        return _FakeFirestoreSnapshot(self._documents.get(self._document_id, {}))
 
 
 class _FakeFirestoreSnapshot:
@@ -55,23 +59,22 @@ class _FakeFirestoreSnapshot:
 
 
 class _FakeFirestoreCollection:
-    def __init__(self, documents: list[dict[str, object]]) -> None:
+    def __init__(self, documents: dict[str, dict[str, object]]) -> None:
         self._documents = documents
 
     def document(self, document_id: str | None = None) -> _FakeFirestoreDocumentReference:
-        del document_id
-        return _FakeFirestoreDocumentReference(self._documents)
+        return _FakeFirestoreDocumentReference(self._documents, document_id)
 
     def stream(self) -> list[_FakeFirestoreSnapshot]:
-        return [_FakeFirestoreSnapshot(document) for document in self._documents]
+        return [_FakeFirestoreSnapshot(document) for document in self._documents.values()]
 
 
 class _FakeFirestoreClient:
     def __init__(self) -> None:
-        self._collections: dict[str, list[dict[str, object]]] = {}
+        self._collections: dict[str, dict[str, dict[str, object]]] = {}
 
     def collection(self, collection_name: str) -> _FakeFirestoreCollection:
-        documents = self._collections.setdefault(collection_name, [])
+        documents = self._collections.setdefault(collection_name, {})
         return _FakeFirestoreCollection(documents)
 
 

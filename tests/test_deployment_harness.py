@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from unified_modernization.gateway.bootstrap import (
     TrafficMode,
     build_http_search_gateway_service_from_env,
@@ -58,6 +60,17 @@ def test_load_gateway_integration_config_from_env_parses_runtime_and_index_maps(
     assert config.elastic.index_names_by_entity_type["invoiceDocument"] == "elastic-invoices"
     assert config.field_map["Status"] == "status"
     assert config.dedicated_tenants == {"tenant-a", "tenant-b"}
+
+
+def test_load_gateway_integration_config_from_env_reports_invalid_numeric_fields() -> None:
+    with pytest.raises(ValueError, match="UMP_GATEWAY_CANARY_PERCENT must be an integer"):
+        load_gateway_integration_config_from_env(
+            {
+                "UMP_AZURE_SEARCH_ENDPOINT": "https://azure.example.com",
+                "UMP_ELASTICSEARCH_ENDPOINT": "https://elastic.example.com",
+                "UMP_GATEWAY_CANARY_PERCENT": "abc",
+            }
+        )
 
 
 def test_load_projection_publisher_runtime_config_from_env_parses_alias_map() -> None:
@@ -176,6 +189,38 @@ def test_search_gateway_harness_reports_latency_and_shadow_counts() -> None:
     assert report.successful_requests == 4
     assert report.shadow_regressions == 0
     assert report.average_latency_ms >= 0.0
+
+
+def test_search_gateway_harness_percentiles_use_interpolation() -> None:
+    telemetry = InMemoryTelemetrySink()
+    from unified_modernization.gateway.service import SearchGatewayService, TrafficMode
+
+    service = SearchGatewayService(
+        azure_backend=_FakeBackend({"results": [{"id": "1"}]}),
+        elastic_backend=_FakeBackend({"results": [{"id": "1"}]}),
+        mode=TrafficMode.AZURE_ONLY,
+        telemetry_sink=telemetry,
+    )
+
+    report = asyncio.run(
+        run_search_gateway_harness(
+            service,
+            [
+                SearchHarnessCase(
+                    name="weighted",
+                    consumer_id="consumer-1",
+                    tenant_id="tenant-a",
+                    entity_type="customerDocument",
+                    raw_params={"$search": "gold"},
+                    weight=3,
+                )
+            ],
+            config=SearchHarnessConfig(concurrency=1, iterations=1),
+            telemetry_sink=telemetry,
+        )
+    )
+
+    assert report.p99_latency_ms >= report.p50_latency_ms
 
 
 def test_run_smoke_test_executes_single_pass() -> None:
