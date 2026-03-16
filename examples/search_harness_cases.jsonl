@@ -1,0 +1,2 @@
+{"name":"customer-search","consumer_id":"web-frontend","tenant_id":"tenant-a","entity_type":"customerDocument","raw_params":{"$search":"gold customer","$filter":"Status eq 'ACTIVE' and Tier gt 3","$top":"10"},"weight":3}
+{"name":"invoice-search","consumer_id":"billing-portal","tenant_id":"tenant-b","entity_type":"invoiceDocument","raw_params":{"$search":"overdue invoice","$filter":"Status ne 'PAID'","$top":"5"},"weight":1}

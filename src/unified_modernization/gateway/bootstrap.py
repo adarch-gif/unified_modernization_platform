@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
+
 from pydantic import BaseModel, Field
 
 from unified_modernization.gateway.clients import (
@@ -146,3 +149,104 @@ def build_http_search_gateway_service(
         judgment_provider=judgment_provider,
         telemetry_sink=telemetry_sink,
     )
+
+
+def load_gateway_integration_config_from_env(
+    env: Mapping[str, str] | None = None,
+    *,
+    prefix: str = "UMP_",
+) -> GatewayIntegrationConfig:
+    source = env or os.environ
+    return GatewayIntegrationConfig(
+        runtime=GatewayRuntimeConfig(
+            environment=source.get(f"{prefix}ENVIRONMENT", "dev").strip().lower(),
+            mode=TrafficMode(source.get(f"{prefix}GATEWAY_MODE", TrafficMode.AZURE_ONLY.value).strip().lower()),
+            canary_percent=int(source.get(f"{prefix}GATEWAY_CANARY_PERCENT", "0")),
+            auto_disable_canary_on_regression=_parse_bool(
+                source.get(f"{prefix}GATEWAY_AUTO_DISABLE_CANARY_ON_REGRESSION", "true")
+            ),
+            azure_timeout_seconds=float(source.get(f"{prefix}GATEWAY_AZURE_TIMEOUT_SECONDS", "2.0")),
+            elastic_timeout_seconds=float(source.get(f"{prefix}GATEWAY_ELASTIC_TIMEOUT_SECONDS", "1.0")),
+            max_retries=int(source.get(f"{prefix}GATEWAY_MAX_RETRIES", "2")),
+            failure_threshold=int(source.get(f"{prefix}GATEWAY_FAILURE_THRESHOLD", "5")),
+            recovery_timeout_seconds=float(source.get(f"{prefix}GATEWAY_RECOVERY_TIMEOUT_SECONDS", "30.0")),
+        ),
+        azure=AzureGatewayBackendConfig(
+            endpoint=_required_str(source.get(f"{prefix}AZURE_SEARCH_ENDPOINT"), field_name=f"{prefix}AZURE_SEARCH_ENDPOINT"),
+            default_index_name=_optional_str(source.get(f"{prefix}AZURE_SEARCH_DEFAULT_INDEX")),
+            index_names_by_entity_type=_parse_mapping(source.get(f"{prefix}AZURE_SEARCH_INDEX_MAP")),
+            api_version=source.get(f"{prefix}AZURE_SEARCH_API_VERSION", "2025-09-01").strip(),
+            api_key=_optional_str(source.get(f"{prefix}AZURE_SEARCH_API_KEY")),
+            bearer_token=_optional_str(source.get(f"{prefix}AZURE_SEARCH_BEARER_TOKEN")),
+            document_id_field=source.get(f"{prefix}AZURE_SEARCH_DOCUMENT_ID_FIELD", "id").strip(),
+        ),
+        elastic=ElasticsearchGatewayBackendConfig(
+            endpoint=_required_str(source.get(f"{prefix}ELASTICSEARCH_ENDPOINT"), field_name=f"{prefix}ELASTICSEARCH_ENDPOINT"),
+            default_index_name=_optional_str(source.get(f"{prefix}ELASTICSEARCH_DEFAULT_INDEX")),
+            index_names_by_entity_type=_parse_mapping(source.get(f"{prefix}ELASTICSEARCH_INDEX_MAP")),
+            api_key=_optional_str(source.get(f"{prefix}ELASTICSEARCH_API_KEY")),
+            bearer_token=_optional_str(source.get(f"{prefix}ELASTICSEARCH_BEARER_TOKEN")),
+            document_id_field=source.get(f"{prefix}ELASTICSEARCH_DOCUMENT_ID_FIELD", "id").strip(),
+        ),
+        field_map=_parse_mapping(source.get(f"{prefix}GATEWAY_FIELD_MAP")),
+        dedicated_tenants=_parse_set(source.get(f"{prefix}DEDICATED_TENANTS")),
+    )
+
+
+def build_http_search_gateway_service_from_env(
+    *,
+    judgment_provider: QueryJudgmentProvider | None = None,
+    telemetry_sink: TelemetrySink | None = None,
+    evaluator: SearchEvaluationHarness | None = None,
+    quality_gate: ShadowQualityGate | None = None,
+    env: Mapping[str, str] | None = None,
+    prefix: str = "UMP_",
+) -> SearchGatewayService:
+    return build_http_search_gateway_service(
+        config=load_gateway_integration_config_from_env(env, prefix=prefix),
+        judgment_provider=judgment_provider,
+        telemetry_sink=telemetry_sink,
+        evaluator=evaluator,
+        quality_gate=quality_gate,
+    )
+
+
+def _parse_mapping(raw: str | None) -> dict[str, str]:
+    if raw is None or not raw.strip():
+        return {}
+    pairs: dict[str, str] = {}
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        pairs[key] = value.strip()
+    return pairs
+
+
+def _parse_set(raw: str | None) -> set[str]:
+    if raw is None or not raw.strip():
+        return set()
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _parse_bool(raw: str | None) -> bool:
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _optional_str(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _required_str(value: str | None, *, field_name: str) -> str:
+    stripped = _optional_str(value)
+    if stripped is None:
+        raise ValueError(f"{field_name} is required")
+    return stripped

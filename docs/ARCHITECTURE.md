@@ -84,6 +84,7 @@ The gateway also now supports:
 - best-effort shadow execution so primary-serving traffic survives shadow-only failures
 - resilient backend wrappers for timeout, retry, and circuit-breaker behavior
 - concrete Azure AI Search and Elasticsearch query backends that fit the gateway `SearchBackend` protocol
+- a smoke/load harness that replays representative query cases through the exact gateway runtime path
 - bootstrap-time enforcement so production startup does not silently use raw backends or no-op telemetry
 
 ### Search evaluation
@@ -140,6 +141,7 @@ The repo now includes operational scaffolding around the core architecture:
 - `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
 - `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
 - `observability/opentelemetry.py` bridges the telemetry protocol into OpenTelemetry-compatible traces and metrics
+- `observability/bootstrap.py` adds environment-driven telemetry sink selection for local harnesses and deployed services
 - `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions
 - `gateway/asgi.py` adds API-key protection, bounded request parsing, and explicit `422` translation failures for the exposed gateway endpoints
 - `config/loader.py` removes handwritten per-domain Python policy construction

@@ -43,6 +43,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Optional projection runtime publisher hook for search-index delivery and replay on publish failure
 - Observability primitives for structured events, counters, timings, and spans
 - OpenTelemetry-compatible telemetry sink with OTLP HTTP export bootstrap
+- Gateway smoke/load harness with JSON or JSONL case playback and latency/error reporting
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
@@ -95,6 +96,28 @@ python -m pytest -q
 
 ```powershell
 uvicorn unified_modernization.gateway.asgi:app --app-dir src --reload
+```
+
+### Run the gateway smoke/load harness
+
+```powershell
+python -m unified_modernization.gateway.harness `
+  --cases-file examples/search_harness_cases.jsonl `
+  --concurrency 8 `
+  --iterations 20
+```
+
+This command reuses the real gateway bootstraps and expects the concrete client env vars to be set, for example:
+
+```text
+UMP_ENVIRONMENT=prod
+UMP_GATEWAY_MODE=shadow
+UMP_AZURE_SEARCH_ENDPOINT=https://<service>.search.windows.net
+UMP_AZURE_SEARCH_DEFAULT_INDEX=customer-search
+UMP_ELASTICSEARCH_ENDPOINT=https://<elastic-cluster>
+UMP_ELASTICSEARCH_DEFAULT_INDEX=customerdocument-shared_a-read
+UMP_GATEWAY_FIELD_MAP=Status=status,Tier=tier,Region=region
+UMP_TELEMETRY_MODE=memory
 ```
 
 ### Health endpoint
@@ -155,16 +178,18 @@ But:
   Concrete Azure AI Search and Elasticsearch query backends that fit the gateway `SearchBackend` protocol
 - `gateway/bootstrap.py`
   Production-safe gateway startup plus config-driven construction for the concrete Azure and Elasticsearch clients
+- `gateway/harness.py`
+  Smoke/load runner for the concrete gateway path with concurrency, latency percentiles, and shadow-signal reporting
 - `gateway/asgi.py`
   API-key middleware, request-size limits, explicit `422` translation errors, and a testable ASGI app builder
 - `gateway/resilience.py`
   Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
-- `gateway/bootstrap.py`
-  Production-safe gateway startup that wraps raw backends and rejects silent telemetry in non-dev environments
 - `observability/telemetry.py`
   Structured telemetry events, counters, timings, and trace-like spans
 - `observability/opentelemetry.py`
   OpenTelemetry-compatible telemetry sink that maps the platform telemetry protocol to OTLP-ready traces and metrics
+- `observability/bootstrap.py`
+  Environment-driven telemetry sink selection for noop, memory, logger, or OTLP HTTP export modes
 - `reconciliation/engine.py`
   Snapshot reconciliation plus recursive bucketed anti-entropy, remote paginated bucket fetch, and bucket-level drill-down
 - `routing/tenant_policy.py`
@@ -179,10 +204,10 @@ But:
 ## Immediate next steps
 
 1. Wire `SpannerProjectionStateStore`, `FirestoreCutoverStateStore`, and the concrete search clients to real cloud credentials and managed environments.
-2. Add any remaining domain-specific CDC envelopes and source-specific enrichments not covered by the built-in Cosmos, Firestore, Debezium-style, and Spanner adapters.
-3. Route telemetry into OpenTelemetry exporters or a real metrics backend instead of in-memory/logger sinks.
+2. Run the gateway harness against real Azure and Elastic endpoints at target and 2x target concurrency, then keep the report artifacts as rollout evidence.
+3. Switch telemetry mode from memory/logger to OTLP HTTP or a production metrics backend in deployed environments.
 4. Replace local pilot-grade durability layers with managed production stores and secret-provider integration where required.
-5. Add load and replay testing around the concrete search-client and publisher paths before live shadow traffic.
+5. Add any remaining domain-specific CDC envelopes and source-specific enrichments not covered by the built-in Cosmos, Firestore, Debezium-style, and Spanner adapters.
 
 ## Status
 

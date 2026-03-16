@@ -33,6 +33,7 @@
 ## Phase 3
 
 - deploy thin slice
+- run the gateway smoke/load harness against deployed Azure and Elastic backends
 - run shadow traffic
 - collect overlap, `NDCG@10`, `MRR`, and zero-result evidence
 - exercise rollback
