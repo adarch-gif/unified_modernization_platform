@@ -553,7 +553,8 @@ def test_debezium_change_event_adapter_uses_before_image_for_deletes() -> None:
             domain_name="customer_documents",
             entity_type="customerDocument",
             fragment_owner="customer_profile",
-            source_technology=SourceTechnology.ALLOYDB,
+            source_technology=SourceTechnology.AZURE_SQL,
+            lsn_format="sqlserver_lsn",
         )
     )
 
@@ -562,7 +563,7 @@ def test_debezium_change_event_adapter_uses_before_image_for_deletes() -> None:
             "payload": {
                 "op": "d",
                 "ts_ms": "1710000000000",
-                "source": {"lsn": "16:123:9"},
+                "source": {"lsn": "00000016:00000123:0009"},
                 "before": {
                     "id": "doc-8",
                     "tenant_id": "tenant-b",
@@ -572,10 +573,68 @@ def test_debezium_change_event_adapter_uses_before_image_for_deletes() -> None:
         }
     )
 
-    assert event.source_technology == SourceTechnology.ALLOYDB
+    assert event.source_technology == SourceTechnology.AZURE_SQL
     assert event.change_type == ChangeType.DELETE
     assert event.logical_entity_id == "doc-8"
-    assert event.source_version == 161239
+    assert event.source_version == (0x16 << 48) | (0x123 << 16) | 0x9
+
+
+def test_debezium_change_event_adapter_parses_postgres_lsn() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+            source_technology=SourceTechnology.ALLOYDB,
+            lsn_format="postgres_lsn",
+        )
+    )
+
+    event = adapter.normalize(
+        {
+            "payload": {
+                "op": "u",
+                "ts_ms": 1_710_000_000_000,
+                "source": {"lsn": "1/AF3C0"},
+                "after": {
+                    "id": "doc-pg",
+                    "tenant_id": "tenant-a",
+                },
+            }
+        }
+    )
+
+    assert event.source_version == (0x1 << 32) | 0xAF3C0
+
+
+def test_debezium_change_event_adapter_deep_copies_nested_payloads() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+        )
+    )
+    nested = {"profile": {"tier": "gold"}, "tags": ["vip"]}
+    record = {
+        "payload": {
+            "op": "u",
+            "ts_ms": 1_710_000_000_000,
+            "source": {"lsn": 12345},
+            "after": {
+                "id": "doc-deep",
+                "tenant_id": "tenant-a",
+                **nested,
+            },
+        }
+    }
+
+    event = adapter.normalize(record)
+    record["payload"]["after"]["profile"]["tier"] = "silver"  # type: ignore[index]
+    record["payload"]["after"]["tags"].append("changed")  # type: ignore[index]
+
+    assert event.payload["profile"]["tier"] == "gold"
+    assert event.payload["tags"] == ["vip"]
 
 
 def test_debezium_change_event_adapter_normalizes_timestamp_fallbacks_to_millis() -> None:
@@ -585,6 +644,7 @@ def test_debezium_change_event_adapter_normalizes_timestamp_fallbacks_to_millis(
             entity_type="customerDocument",
             fragment_owner="customer_profile",
             source_version_field=None,
+            allow_timestamp_source_version_fallback=True,
         )
     )
 
@@ -615,8 +675,60 @@ def test_debezium_change_event_adapter_normalizes_timestamp_fallbacks_to_millis(
         }
     )
 
-    assert microsecond_event.source_version == 1_710_000_000_000
-    assert nanosecond_event.source_version == 1_710_000_000_000
+    assert microsecond_event.source_version == 1_710_000_000_000_000_000
+    assert nanosecond_event.source_version == 1_710_000_000_000_000_000
+
+
+def test_debezium_change_event_adapter_rejects_timestamp_fallback_without_explicit_opt_in() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+            source_version_field=None,
+        )
+    )
+
+    with pytest.raises(ValueError, match="native numeric source version"):
+        adapter.normalize(
+            {
+                "payload": {
+                    "op": "u",
+                    "ts_ms": 1_710_000_000_000,
+                    "after": {
+                        "id": "doc-fallback-disabled",
+                        "tenant_id": "tenant-a",
+                    },
+                }
+            }
+        )
+
+
+def test_debezium_change_event_adapter_preserves_epoch_zero_timestamp_fallback() -> None:
+    adapter = DebeziumChangeEventAdapter(
+        DebeziumChangeEventAdapterConfig(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            fragment_owner="customer_profile",
+            source_version_field=None,
+            allow_timestamp_source_version_fallback=True,
+        )
+    )
+
+    event = adapter.normalize(
+        {
+            "payload": {
+                "op": "u",
+                "ts_ms": 0,
+                "after": {
+                    "id": "doc-epoch-zero",
+                    "tenant_id": "tenant-a",
+                },
+            }
+        }
+    )
+
+    assert event.source_version == 0
 
 
 def test_debezium_change_event_adapter_rejects_truncate_records() -> None:

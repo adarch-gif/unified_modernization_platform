@@ -194,13 +194,21 @@ class InMemoryTelemetrySink:
 
 
 class StructuredLoggerTelemetrySink:
+    _SEVERITY_MAP = {
+        "error": logging.ERROR,
+        "warning": logging.WARNING,
+        "info": logging.INFO,
+    }
+
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger("unified_modernization.telemetry")
 
     def emit(self, event: TelemetryEvent | Mapping[str, Any]) -> None:
         normalized = InMemoryTelemetrySink._normalize_event(event)
         payload = normalized.model_dump()
-        self._logger.info(
+        level = self._SEVERITY_MAP.get(normalized.severity.lower(), logging.INFO)
+        self._logger.log(
+            level,
             "telemetry %s",
             normalized.model_dump_json(),
             extra={"json_fields": payload},

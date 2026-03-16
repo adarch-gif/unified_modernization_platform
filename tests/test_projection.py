@@ -272,8 +272,15 @@ class _FakeSpannerSnapshot:
         if "FROM projection_states" in sql and "payload_json" in sql:
             state = self._states.get(key)
             return [] if state is None else [{"payload_json": state["payload_json"]}]
-        if "SELECT status" in sql:
-            return [{"status": row["status"]} for row in self._states.values()]
+        if "COUNT(*) AS pending_count" in sql:
+            published_status = str(params.get("published_status", ""))
+            deleted_status = str(params.get("deleted_status", ""))
+            pending_count = sum(
+                1
+                for row in self._states.values()
+                if row["status"] not in {published_status, deleted_status}
+            )
+            return [{"pending_count": pending_count}]
         raise AssertionError(f"unexpected SQL: {sql}")
 
 

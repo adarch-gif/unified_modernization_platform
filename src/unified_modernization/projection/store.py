@@ -700,10 +700,26 @@ class SpannerProjectionStateStore:
 
     def pending_count(self) -> int:
         sql = """
-            SELECT status
+            SELECT COUNT(*) AS pending_count
             FROM projection_states
+            WHERE status != @published_status
+              AND status != @deleted_status
         """
-        terminal = {status.value for status in _terminal_states()}
+        params: dict[str, object] = {
+            "published_status": ProjectionStatus.PUBLISHED.value,
+            "deleted_status": ProjectionStatus.DELETED.value,
+        }
         with self._database.snapshot() as snapshot:
-            rows = snapshot.execute_sql(sql)
-            return sum(1 for row in rows if str(row["status"]) not in terminal)
+            rows = list(
+                snapshot.execute_sql(
+                    sql,
+                    params=params,
+                    param_types=self._string_params("published_status", "deleted_status"),
+                )
+            )
+        if not rows:
+            return 0
+        count_value = rows[0]["pending_count"]
+        if not isinstance(count_value, (int, str)):
+            raise ValueError("Spanner pending_count query returned a non-numeric value")
+        return int(count_value)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
@@ -13,6 +14,7 @@ from unified_modernization.contracts.events import (
 )
 
 _INT64_MAX = (1 << 63) - 1
+_LOGGER = logging.getLogger(__name__)
 
 
 class SpannerChangeStreamAdapterConfig(BaseModel):
@@ -94,9 +96,19 @@ def _parse_record_sequence(value: object) -> int:
             raise ValueError("record_sequence exceeds int64 maximum")
         return value
     if isinstance(value, str) and value.strip():
-        digits = "".join(char for char in value if char.isdigit())
-        if digits:
-            parsed = int(digits)
+        normalized = value.strip()
+        try:
+            parsed = int(normalized)
+        except ValueError:
+            digits = "".join(char for char in normalized if char.isdigit())
+            if digits:
+                _LOGGER.warning(
+                    "Spanner record_sequence required digit extraction fallback; prefer canonical numeric values"
+                )
+                parsed = int(digits)
+            else:
+                parsed = None
+        if parsed is not None:
             if parsed > _INT64_MAX:
                 raise ValueError("record_sequence exceeds int64 maximum")
             return parsed

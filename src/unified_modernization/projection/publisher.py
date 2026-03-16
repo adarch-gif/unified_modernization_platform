@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -56,6 +57,7 @@ class ElasticsearchDocumentPublisher:
         self._tenant_policy_engine = tenant_policy_engine or TenantPolicyEngine()
         self._telemetry_sink = telemetry_sink or NoopTelemetrySink()
         self._serializer = serializer or self._default_document_body
+        self._client_lock = threading.RLock()
 
     def publish(self, document: SearchDocument, *, trace_id: str | None = None) -> dict[str, Any]:
         self._ensure_sync_context("publish_async")
@@ -342,14 +344,16 @@ class ElasticsearchDocumentPublisher:
         return f"{self._config.endpoint.rstrip('/')}{path}"
 
     def _get_sync_client(self) -> httpx.Client:
-        if self._client is None:
-            self._client = httpx.Client()
-        return self._client
+        with self._client_lock:
+            if self._client is None:
+                self._client = httpx.Client()
+            return self._client
 
     def _get_async_client(self) -> httpx.AsyncClient:
-        if self._async_client is None:
-            self._async_client = httpx.AsyncClient()
-        return self._async_client
+        with self._client_lock:
+            if self._async_client is None:
+                self._async_client = httpx.AsyncClient()
+            return self._async_client
 
     @staticmethod
     def _ensure_sync_context(async_method_name: str) -> None:

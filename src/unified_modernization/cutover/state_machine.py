@@ -6,7 +6,7 @@ import threading
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -96,8 +96,25 @@ class FirestoreCollectionProtocol(Protocol):
         raise NotImplementedError
 
 
+class FirestoreTransactionProtocol(Protocol):
+    def get(self, document_reference: FirestoreDocumentReferenceProtocol) -> FirestoreDocumentSnapshotProtocol:
+        raise NotImplementedError
+
+    def set(self, document_reference: FirestoreDocumentReferenceProtocol, document_data: dict[str, object]) -> None:
+        raise NotImplementedError
+
+
+_TransactionResult = TypeVar("_TransactionResult")
+
+
 class FirestoreClientProtocol(Protocol):
     def collection(self, collection_name: str) -> FirestoreCollectionProtocol:
+        raise NotImplementedError
+
+    def run_transaction(
+        self,
+        func: Callable[[FirestoreTransactionProtocol], _TransactionResult],
+    ) -> _TransactionResult:
         raise NotImplementedError
 
 
@@ -186,20 +203,31 @@ class FirestoreCutoverStateStore:
 
     def append(self, event: CutoverTransitionEvent) -> None:
         events_collection = self._client.collection(self._events_collection_name(event.domain_name))
-        events_collection.document().set(event.model_dump(mode="json"))
-        latest_state = self.load_latest(event.domain_name) or PersistedCutoverState(
-            domain_name=event.domain_name,
-            backend_state=BackendPrimaryState.AZURE_PRIMARY,
-            search_state=SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK,
-            updated_at_utc=event.timestamp_utc,
-        )
-        if event.track == "backend":
-            latest_state.backend_state = BackendPrimaryState(event.to_state)
-        elif event.track == "search":
-            latest_state.search_state = SearchServingState(event.to_state)
-        latest_state.updated_at_utc = event.timestamp_utc
         latest_collection = self._client.collection(self._state_collection_name(event.domain_name))
-        latest_collection.document("latest").set(latest_state.model_dump(mode="json"))
+        event_reference = events_collection.document()
+        latest_reference = latest_collection.document("latest")
+
+        def transaction_body(transaction: FirestoreTransactionProtocol) -> None:
+            latest_payload = transaction.get(latest_reference).to_dict()
+            latest_state = (
+                PersistedCutoverState.model_validate(latest_payload)
+                if latest_payload
+                else PersistedCutoverState(
+                    domain_name=event.domain_name,
+                    backend_state=BackendPrimaryState.AZURE_PRIMARY,
+                    search_state=SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK,
+                    updated_at_utc=event.timestamp_utc,
+                )
+            )
+            if event.track == "backend":
+                latest_state.backend_state = BackendPrimaryState(event.to_state)
+            elif event.track == "search":
+                latest_state.search_state = SearchServingState(event.to_state)
+            latest_state.updated_at_utc = event.timestamp_utc
+            transaction.set(event_reference, event.model_dump(mode="json"))
+            transaction.set(latest_reference, latest_state.model_dump(mode="json"))
+
+        self._client.run_transaction(transaction_body)
 
     def load_latest(self, domain_name: str) -> PersistedCutoverState | None:
         latest_collection = self._client.collection(self._state_collection_name(domain_name))

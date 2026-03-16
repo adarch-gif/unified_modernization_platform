@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+import threading
+from copy import deepcopy
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
 from pydantic import BaseModel
 
 from unified_modernization.contracts.events import (
@@ -10,6 +14,15 @@ from unified_modernization.contracts.events import (
     MigrationStage,
     SourceTechnology,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class DebeziumLSNFormat(StrEnum):
+    AUTO = "auto"
+    DECIMAL = "decimal"
+    POSTGRES_LSN = "postgres_lsn"
+    SQLSERVER_LSN = "sqlserver_lsn"
 
 
 class DebeziumChangeEventAdapterConfig(BaseModel):
@@ -20,6 +33,8 @@ class DebeziumChangeEventAdapterConfig(BaseModel):
     tenant_field: str = "tenant_id"
     logical_entity_id_field: str = "id"
     source_version_field: str | None = "lsn"
+    lsn_format: DebeziumLSNFormat = DebeziumLSNFormat.AUTO
+    allow_timestamp_source_version_fallback: bool = False
     migration_stage: MigrationStage = MigrationStage.AZURE_PRIMARY
 
 
@@ -28,6 +43,7 @@ class DebeziumChangeEventAdapter:
 
     def __init__(self, config: DebeziumChangeEventAdapterConfig) -> None:
         self._config = config
+        self._timestamp_fallback_warned = threading.Event()
 
     def normalize(self, record: Mapping[str, object]) -> CanonicalDomainEvent:
         payload = record.get("payload")
@@ -49,11 +65,23 @@ class DebeziumChangeEventAdapter:
         if not isinstance(source_section, Mapping):
             source_section = {}
 
-        source_version = _parse_source_version(
+        source_version, used_timestamp_fallback = _parse_source_version(
             source=source_section,
             payload=payload,
             preferred_field=self._config.source_version_field,
+            lsn_format=self._config.lsn_format,
+            allow_timestamp_fallback=self._config.allow_timestamp_source_version_fallback,
         )
+        if used_timestamp_fallback and not self._timestamp_fallback_warned.is_set():
+            _LOGGER.warning(
+                "Debezium adapter is using timestamp fallback for source version; configure a native source version field",
+                extra={
+                    "domain_name": self._config.domain_name,
+                    "entity_type": self._config.entity_type,
+                    "fragment_owner": self._config.fragment_owner,
+                },
+            )
+            self._timestamp_fallback_warned.set()
         event_time = _parse_debezium_event_time(payload)
 
         return CanonicalDomainEvent(
@@ -66,7 +94,7 @@ class DebeziumChangeEventAdapter:
             event_time_utc=event_time,
             change_type=change_type,
             fragment_owner=self._config.fragment_owner,
-            payload=dict(raw_document),
+            payload=deepcopy(dict(raw_document)),
             migration_stage=self._config.migration_stage,
         )
 
@@ -93,24 +121,71 @@ def _parse_source_version(
     source: Mapping[str, object],
     payload: Mapping[str, object],
     preferred_field: str | None,
-) -> int:
+    lsn_format: DebeziumLSNFormat,
+    allow_timestamp_fallback: bool,
+) -> tuple[int, bool]:
     if preferred_field is not None:
         candidate = source.get(preferred_field)
         if isinstance(candidate, int):
-            return candidate
+            return candidate, False
         if isinstance(candidate, str) and candidate.strip():
-            digits = "".join(char for char in candidate if char.isdigit())
-            if digits:
-                return int(digits)
+            return _parse_string_source_version(candidate, lsn_format=lsn_format), False
 
-    for fallback_field, divisor in (("ts_ms", 1), ("ts_us", 1000), ("ts_ns", 1_000_000)):
-        candidate = payload.get(fallback_field) or source.get(fallback_field)
+    if not allow_timestamp_fallback:
+        raise ValueError("Debezium record must contain a native numeric source version")
+
+    fallback = _parse_timestamp_source_version(payload=payload, source=source)
+    if fallback is None:
+        raise ValueError("Debezium record must contain a numeric source version")
+    return fallback, True
+
+
+def _parse_string_source_version(value: str, *, lsn_format: DebeziumLSNFormat) -> int:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Debezium source version string must be non-empty")
+
+    if lsn_format in {DebeziumLSNFormat.AUTO, DebeziumLSNFormat.POSTGRES_LSN} and "/" in normalized:
+        return _parse_postgres_lsn(normalized)
+    if lsn_format in {DebeziumLSNFormat.AUTO, DebeziumLSNFormat.SQLSERVER_LSN} and ":" in normalized:
+        return _parse_sqlserver_lsn(normalized)
+    if lsn_format in {DebeziumLSNFormat.AUTO, DebeziumLSNFormat.DECIMAL}:
+        if normalized.isdigit():
+            return int(normalized)
+        if lsn_format == DebeziumLSNFormat.AUTO:
+            raise ValueError(f"unsupported Debezium source version format {value!r}")
+    raise ValueError(f"unsupported Debezium source version format {value!r}")
+
+
+def _parse_postgres_lsn(value: str) -> int:
+    parts = value.split("/")
+    if len(parts) != 2 or not all(part for part in parts):
+        raise ValueError(f"invalid PostgreSQL LSN {value!r}")
+    return (int(parts[0], 16) << 32) | int(parts[1], 16)
+
+
+def _parse_sqlserver_lsn(value: str) -> int:
+    parts = value.split(":")
+    if len(parts) != 3 or not all(part for part in parts):
+        raise ValueError(f"invalid SQL Server LSN {value!r}")
+    first, second, third = (int(part, 16) for part in parts)
+    return (first << 48) | (second << 16) | third
+
+
+def _parse_timestamp_source_version(
+    *,
+    payload: Mapping[str, object],
+    source: Mapping[str, object],
+) -> int | None:
+    for fallback_field, multiplier in (("ts_ns", 1), ("ts_us", 1000), ("ts_ms", 1_000_000)):
+        candidate = payload.get(fallback_field)
+        if candidate is None:
+            candidate = source.get(fallback_field)
         if isinstance(candidate, int):
-            return candidate // divisor
+            return candidate * multiplier
         if isinstance(candidate, str) and candidate.strip():
-            return int(candidate) // divisor
-
-    raise ValueError("Debezium record must contain a numeric source version")
+            return int(candidate) * multiplier
+    return None
 
 
 def _parse_debezium_event_time(payload: Mapping[str, object]) -> datetime:

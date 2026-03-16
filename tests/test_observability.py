@@ -1,8 +1,9 @@
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from unified_modernization.observability.opentelemetry import OpenTelemetryTelemetrySink
-from unified_modernization.observability.telemetry import TelemetryEvent
+from unified_modernization.observability.telemetry import StructuredLoggerTelemetrySink, TelemetryEvent
 
 
 class _FakeCounter:
@@ -117,3 +118,23 @@ def test_open_telemetry_sink_records_exceptions_on_span_failure() -> None:
         pass
 
     assert tracer.spans[0].exceptions == ["RuntimeError"]
+
+
+def test_structured_logger_sink_routes_events_by_severity() -> None:
+    records: list[logging.LogRecord] = []
+
+    class _CapturingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("unified_modernization.tests.telemetry")
+    logger.handlers = []
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(_CapturingHandler())
+
+    sink = StructuredLoggerTelemetrySink(logger=logger)
+    sink.emit(TelemetryEvent(event_type="projection_failed", severity="error"))
+    sink.emit(TelemetryEvent(event_type="projection_warning", severity="warning"))
+
+    assert [record.levelno for record in records] == [logging.ERROR, logging.WARNING]

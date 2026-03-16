@@ -69,17 +69,31 @@ class _FakeFirestoreCollection:
         return [_FakeFirestoreSnapshot(document) for document in self._documents.values()]
 
 
+class _FakeFirestoreTransaction:
+    def get(self, document_reference: _FakeFirestoreDocumentReference) -> _FakeFirestoreSnapshot:
+        return document_reference.get()
+
+    def set(self, document_reference: _FakeFirestoreDocumentReference, document_data: dict[str, object]) -> None:
+        document_reference.set(document_data)
+
+
 class _FakeFirestoreClient:
     def __init__(self) -> None:
         self._collections: dict[str, dict[str, dict[str, object]]] = {}
+        self.transaction_calls = 0
 
     def collection(self, collection_name: str) -> _FakeFirestoreCollection:
         documents = self._collections.setdefault(collection_name, {})
         return _FakeFirestoreCollection(documents)
 
+    def run_transaction(self, func):  # type: ignore[no-untyped-def]
+        self.transaction_calls += 1
+        return func(_FakeFirestoreTransaction())
+
 
 def test_firestore_cutover_store_rehydrates_domain_state() -> None:
-    store = FirestoreCutoverStateStore(_FakeFirestoreClient())
+    client = _FakeFirestoreClient()
+    store = FirestoreCutoverStateStore(client)
     state = DomainMigrationState(domain_name="customer_documents", store=store)
 
     state.transition_backend(
@@ -97,6 +111,7 @@ def test_firestore_cutover_store_rehydrates_domain_state() -> None:
 
     assert rehydrated.backend_state == BackendPrimaryState.AZURE_PRIMARY_GCP_WARMING
     assert rehydrated.search_state == SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_SHADOW
+    assert client.transaction_calls == 2
 
 
 def test_cutover_bootstrap_requires_durable_store_in_prod() -> None:
