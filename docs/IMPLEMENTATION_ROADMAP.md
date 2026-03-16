@@ -17,7 +17,7 @@
 - wire tenant alias routing and ingestion partition policies into live gateway and ingestion clients
 - wire resilient backend wrappers and real telemetry exporters into live gateway startup
 - implement batch side-load path, checkpoint persistence, and source-watermark capture for backfill
-- replace pilot cutover JSONL durability with a managed cutover state store
+- replace pilot cutover JSONL durability with the implemented Firestore cutover store in deployed environments
 
 ## Phase 2
 
@@ -28,6 +28,7 @@
 - add OpenTelemetry exporters and dashboards
 - add judged query corpus and offline relevance evaluation workflow
 - route quality-gate events into production alerting and canary automation controls
+- wire the ASGI surface to real auth and secret management inputs in deployed environments
 
 ## Phase 3
 

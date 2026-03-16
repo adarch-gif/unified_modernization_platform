@@ -689,7 +689,7 @@ class BucketedReconciliationEngine:
 
     @staticmethod
     def _bucket_id(document_id: str, bucket_count: int) -> str:
-        bucket = int(hashlib.md5(document_id.encode("utf-8")).hexdigest(), 16) % bucket_count
+        bucket = int(hashlib.md5(document_id.encode("utf-8"), usedforsecurity=False).hexdigest(), 16) % bucket_count
         width = max(4, len(str(bucket_count)))
         return f"bucket-{bucket:0{width}d}"
 

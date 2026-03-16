@@ -160,7 +160,7 @@ class SearchGatewayService:
         raise RuntimeError(f"unsupported traffic mode {self._mode}")
 
     def _bucket(self, consumer_id: str) -> int:
-        return int(hashlib.md5(consumer_id.encode("utf-8")).hexdigest(), 16) % 100
+        return int(hashlib.md5(consumer_id.encode("utf-8"), usedforsecurity=False).hexdigest(), 16) % 100
 
     def _build_elastic_request(self, tenant_id: str, entity_type: str, raw_params: dict[str, str]) -> dict[str, Any]:
         policy = self._tenant_policy_engine.resolve(tenant_id, entity_type)

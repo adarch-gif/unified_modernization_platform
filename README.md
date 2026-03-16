@@ -15,11 +15,12 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Pluggable projection state store with durable SQLite implementation
 - Spanner-backed projection state store contract and schema-driven implementation path
 - Independent backend and search cutover state machines
-- Persisted cutover transition store with restart-safe rehydration
+- Persisted cutover transition stores with restart-safe rehydration, including JSONL and Firestore-backed paths
 - Tenant routing policy engine and alias-routing model
 - Whale-tenant ingestion partition policy
 - Search Gateway service and OData to Elasticsearch translator
 - ASGI gateway middleware with API-key protection and request-size guard
+- ASGI app builder with production-aware auth, bounded request parsing, and explicit `422` OData translation failures
 - Search evaluation harness with live overlap and offline judged relevance metrics
 - Operational shadow quality gate with telemetry-ready events and canary auto-freeze on judged regression
 - Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
@@ -130,7 +131,9 @@ But:
 - `backfill/coordinator.py`
   Bulk side-load, typed watermarks, resumable checkpoints, and stream handoff planning
 - `cutover/state_machine.py`
-  Persisted transition events with restart-safe cutover state rehydration
+  Persisted transition events with restart-safe cutover state rehydration across JSONL and Firestore-backed stores
+- `cutover/bootstrap.py`
+  Production-safe cutover bootstrap that forbids ephemeral in-memory state outside local/dev/test
 - `config/loader.py`
   YAML loader that turns domain onboarding config into runtime dependency policies
 - `gateway/evaluation.py`
@@ -138,7 +141,7 @@ But:
 - `gateway/service.py`
   Canary-aware search flow that can automatically freeze Elastic ramp-up when judged shadow quality regresses
 - `gateway/asgi.py`
-  API-key middleware, request-size limits, and explicit error handling for the lightweight gateway surface
+  API-key middleware, request-size limits, explicit `422` translation errors, and a testable ASGI app builder
 - `gateway/resilience.py`
   Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
 - `gateway/bootstrap.py`

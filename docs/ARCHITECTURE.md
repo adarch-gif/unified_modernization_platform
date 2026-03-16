@@ -100,6 +100,13 @@ The cutover path is now restart-safe:
 - transitions are persisted as append-only events
 - current domain state is rehydrated from the persisted log on startup
 - operators can supply reason and actor metadata per transition
+- deployed environments can back the cutover log with Firestore instead of local JSONL durability
+
+There is now a cutover bootstrap seam mirroring the projection and gateway bootstraps:
+
+- local/dev/test may use in-memory cutover state for fast tests
+- staging/production must provide an explicit durable cutover store
+- the helper in `cutover/bootstrap.py` exists so migration orchestration cannot silently default to ephemeral state
 
 ### Reconciliation
 
@@ -129,7 +136,7 @@ The repo now includes operational scaffolding around the core architecture:
 - `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
 - `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
 - `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions
-- `gateway/asgi.py` adds API-key protection and request-size enforcement for the exposed gateway endpoints
+- `gateway/asgi.py` adds API-key protection, bounded request parsing, and explicit `422` translation failures for the exposed gateway endpoints
 - `config/loader.py` removes handwritten per-domain Python policy construction
 
 ## Production evolution path

@@ -20,5 +20,7 @@ jobs:
         run: python -m ruff check src tests
       - name: Type check
         run: python -m mypy src --strict --ignore-missing-imports
+      - name: Security scan
+        run: python -m bandit -r src
       - name: Run tests
         run: python -m pytest -q
