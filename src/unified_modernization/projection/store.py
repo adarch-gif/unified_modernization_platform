@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, cast
@@ -19,11 +19,26 @@ from unified_modernization.contracts.projection import (
 
 try:
     from google.cloud.spanner_v1 import param_types as spanner_param_types
+    from google.cloud.spanner_v1 import COMMIT_TIMESTAMP as spanner_commit_timestamp
+    from google.cloud.spanner_v1 import KeySet as SpannerKeySet
 except ImportError:  # pragma: no cover - optional dependency
     spanner_param_types = None
+    spanner_commit_timestamp = None
+    SpannerKeySet = None
 
 
 SPANNER_PROJECTION_DDL: tuple[str, ...] = (
+    """
+    CREATE TABLE projection_states (
+      tenant_id STRING(MAX) NOT NULL,
+      domain_name STRING(MAX) NOT NULL,
+      entity_type STRING(MAX) NOT NULL,
+      logical_entity_id STRING(MAX) NOT NULL,
+      status STRING(MAX) NOT NULL,
+      payload_json STRING(MAX) NOT NULL,
+      commit_timestamp TIMESTAMP OPTIONS (allow_commit_timestamp=true)
+    ) PRIMARY KEY (tenant_id, domain_name, entity_type, logical_entity_id)
+    """.strip(),
     """
     CREATE TABLE projection_fragments (
       tenant_id STRING(MAX) NOT NULL,
@@ -32,18 +47,10 @@ SPANNER_PROJECTION_DDL: tuple[str, ...] = (
       logical_entity_id STRING(MAX) NOT NULL,
       fragment_owner STRING(MAX) NOT NULL,
       source_version INT64 NOT NULL,
-      payload_json STRING(MAX) NOT NULL
-    ) PRIMARY KEY (tenant_id, domain_name, entity_type, logical_entity_id, fragment_owner)
-    """.strip(),
-    """
-    CREATE TABLE projection_states (
-      tenant_id STRING(MAX) NOT NULL,
-      domain_name STRING(MAX) NOT NULL,
-      entity_type STRING(MAX) NOT NULL,
-      logical_entity_id STRING(MAX) NOT NULL,
-      status STRING(MAX) NOT NULL,
-      payload_json STRING(MAX) NOT NULL
-    ) PRIMARY KEY (tenant_id, domain_name, entity_type, logical_entity_id)
+      payload_json STRING(MAX) NOT NULL,
+      commit_timestamp TIMESTAMP OPTIONS (allow_commit_timestamp=true)
+    ) PRIMARY KEY (tenant_id, domain_name, entity_type, logical_entity_id, fragment_owner),
+      INTERLEAVE IN PARENT projection_states ON DELETE CASCADE
     """.strip(),
 )
 
@@ -58,6 +65,19 @@ def _payload_json(value: FragmentRecord | ProjectionStateRecord) -> str:
 
 def _initial_entity(key: ProjectionKey) -> ProjectionEntityRecord:
     return ProjectionEntityRecord(key=key.model_copy(deep=True))
+
+
+def _commit_timestamp_value() -> object:
+    if spanner_commit_timestamp is not None:
+        return spanner_commit_timestamp
+    return "PENDING_COMMIT_TIMESTAMP"
+
+
+def _spanner_keyset_for_single_row(*key_values: object) -> object:
+    keys = [list(key_values)]
+    if SpannerKeySet is not None:
+        return SpannerKeySet(keys=keys)
+    return {"keys": keys}
 
 
 def _finalize_mutation(
@@ -101,6 +121,21 @@ class SpannerTransactionProtocol(Protocol):
         params: dict[str, object] | None = None,
         param_types: dict[str, object] | None = None,
     ) -> int:
+        raise NotImplementedError
+
+    def insert_or_update(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Iterable[Sequence[object]],
+    ) -> None:
+        raise NotImplementedError
+
+    def delete(
+        self,
+        table: str,
+        keyset: object,
+    ) -> None:
         raise NotImplementedError
 
 
@@ -501,25 +536,15 @@ class SpannerProjectionStateStore:
         key: ProjectionKey,
         fragment_owner: str,
     ) -> None:
-        params = self._params(key) | {"fragment_owner": fragment_owner}
-        param_types = self._string_params(
-            "tenant_id",
-            "domain_name",
-            "entity_type",
-            "logical_entity_id",
-            "fragment_owner",
-        )
-        transaction.execute_update(
-            """
-            DELETE FROM projection_fragments
-            WHERE tenant_id = @tenant_id
-              AND domain_name = @domain_name
-              AND entity_type = @entity_type
-              AND logical_entity_id = @logical_entity_id
-              AND fragment_owner = @fragment_owner
-            """,
-            params=params,
-            param_types=param_types,
+        transaction.delete(
+            "projection_fragments",
+            _spanner_keyset_for_single_row(
+                key.tenant_id,
+                key.domain_name,
+                key.entity_type,
+                key.logical_entity_id,
+                fragment_owner,
+            ),
         )
 
     def _upsert_fragment_in_transaction(
@@ -529,33 +554,30 @@ class SpannerProjectionStateStore:
         key: ProjectionKey,
         fragment: FragmentRecord,
     ) -> None:
-        params = self._params(key) | {
-            "fragment_owner": fragment.fragment_owner,
-            "source_version": fragment.source_version,
-            "payload_json": _payload_json(fragment),
-        }
-        param_types = self._string_params(
-            "tenant_id",
-            "domain_name",
-            "entity_type",
-            "logical_entity_id",
-            "fragment_owner",
-            "payload_json",
-        )
-        if param_types is not None:
-            param_types["source_version"] = spanner_param_types.INT64
-        transaction.execute_update(
-            """
-            INSERT OR UPDATE INTO projection_fragments (
-              tenant_id, domain_name, entity_type, logical_entity_id,
-              fragment_owner, source_version, payload_json
-            ) VALUES (
-              @tenant_id, @domain_name, @entity_type, @logical_entity_id,
-              @fragment_owner, @source_version, @payload_json
-            )
-            """,
-            params=params,
-            param_types=param_types,
+        transaction.insert_or_update(
+            "projection_fragments",
+            (
+                "tenant_id",
+                "domain_name",
+                "entity_type",
+                "logical_entity_id",
+                "fragment_owner",
+                "source_version",
+                "payload_json",
+                "commit_timestamp",
+            ),
+            [
+                (
+                    key.tenant_id,
+                    key.domain_name,
+                    key.entity_type,
+                    key.logical_entity_id,
+                    fragment.fragment_owner,
+                    fragment.source_version,
+                    _payload_json(fragment),
+                    _commit_timestamp_value(),
+                )
+            ],
         )
 
     def _upsert_state_in_transaction(
@@ -565,30 +587,28 @@ class SpannerProjectionStateStore:
         key: ProjectionKey,
         state: ProjectionStateRecord,
     ) -> None:
-        params = self._params(key) | {
-            "status": state.status.value,
-            "payload_json": _payload_json(state),
-        }
-        param_types = self._string_params(
-            "tenant_id",
-            "domain_name",
-            "entity_type",
-            "logical_entity_id",
-            "status",
-            "payload_json",
-        )
-        transaction.execute_update(
-            """
-            INSERT OR UPDATE INTO projection_states (
-              tenant_id, domain_name, entity_type, logical_entity_id,
-              status, payload_json
-            ) VALUES (
-              @tenant_id, @domain_name, @entity_type, @logical_entity_id,
-              @status, @payload_json
-            )
-            """,
-            params=params,
-            param_types=param_types,
+        transaction.insert_or_update(
+            "projection_states",
+            (
+                "tenant_id",
+                "domain_name",
+                "entity_type",
+                "logical_entity_id",
+                "status",
+                "payload_json",
+                "commit_timestamp",
+            ),
+            [
+                (
+                    key.tenant_id,
+                    key.domain_name,
+                    key.entity_type,
+                    key.logical_entity_id,
+                    state.status.value,
+                    _payload_json(state),
+                    _commit_timestamp_value(),
+                )
+            ],
         )
 
     def get_fragments(self, key: ProjectionKey) -> dict[str, FragmentRecord]:

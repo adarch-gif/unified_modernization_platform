@@ -1,12 +1,14 @@
 from pathlib import Path
 
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, cast
 
 import pytest
 
 from unified_modernization.contracts.events import CanonicalDomainEvent, ChangeType, SourceTechnology
 from unified_modernization.contracts.projection import DependencyPolicy, DependencyRule, ProjectionKey, ProjectionStatus
+from unified_modernization.observability.telemetry import InMemoryTelemetrySink
 from unified_modernization.projection.bootstrap import build_projection_builder
 from unified_modernization.projection.builder import ProjectionBuilder
 from unified_modernization.projection.store import (
@@ -242,7 +244,7 @@ class _FakeSpannerSnapshot:
     def __enter__(self) -> "_FakeSpannerSnapshot":
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
         return False
 
     def execute_sql(
@@ -282,28 +284,55 @@ class _FakeSpannerTransaction(_FakeSpannerSnapshot):
         params: dict[str, object] | None = None,
         param_types: dict[str, object] | None = None,
     ) -> int:
-        del param_types
-        params = params or {}
+        del sql, params, param_types
+        raise AssertionError("Spanner store should use mutation APIs rather than DML execute_update")
+
+    def insert_or_update(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Iterable[Sequence[object]],
+    ) -> None:
+        rows = list(values)
+        assert len(rows) == 1
+        row = dict(zip(columns, rows[0], strict=True))
         key = (
-            str(params.get("tenant_id", "")),
-            str(params.get("domain_name", "")),
-            str(params.get("entity_type", "")),
-            str(params.get("logical_entity_id", "")),
+            str(row.get("tenant_id", "")),
+            str(row.get("domain_name", "")),
+            str(row.get("entity_type", "")),
+            str(row.get("logical_entity_id", "")),
         )
-        if "projection_fragments" in sql:
-            fragment_owner = str(params["fragment_owner"])
+        if table == "projection_fragments":
+            fragment_owner = str(row["fragment_owner"])
+            source_version = row["source_version"]
+            assert isinstance(source_version, int)
             self._fragments.setdefault(key, {})[fragment_owner] = {
-                "source_version": int(params["source_version"]),
-                "payload_json": str(params["payload_json"]),
+                "source_version": source_version,
+                "payload_json": str(row["payload_json"]),
             }
-            return 1
-        if "projection_states" in sql:
+            return
+        if table == "projection_states":
             self._states[key] = {
-                "status": str(params["status"]),
-                "payload_json": str(params["payload_json"]),
+                "status": str(row["status"]),
+                "payload_json": str(row["payload_json"]),
             }
-            return 1
-        raise AssertionError(f"unexpected DML: {sql}")
+            return
+        raise AssertionError(f"unexpected mutation table: {table}")
+
+    def delete(self, table: str, keyset: object) -> None:
+        if table != "projection_fragments":
+            raise AssertionError(f"unexpected delete table: {table}")
+        keys = keyset["keys"] if isinstance(keyset, dict) else cast(Any, keyset).keys
+        for row in keys:
+            tenant_id, domain_name, entity_type, logical_entity_id, fragment_owner = row
+            key = (
+                str(tenant_id),
+                str(domain_name),
+                str(entity_type),
+                str(logical_entity_id),
+            )
+            fragments = self._fragments.get(key, {})
+            fragments.pop(str(fragment_owner), None)
 
 
 class _FakeSpannerDatabase:
@@ -314,9 +343,8 @@ class _FakeSpannerDatabase:
     def snapshot(self) -> _FakeSpannerSnapshot:
         return _FakeSpannerSnapshot(self.fragments, self.states)
 
-    def run_in_transaction(self, func: object) -> object:
+    def run_in_transaction(self, func: Callable[[_FakeSpannerTransaction], object]) -> object:
         transaction = _FakeSpannerTransaction(self.fragments, self.states)
-        assert callable(func)
         return func(transaction)
 
 
@@ -351,6 +379,15 @@ def test_projection_state_persists_in_spanner_store() -> None:
     assert persisted_state.entity_revision >= 1
     assert store.pending_count() == 0
     assert len(database.fragments) == 1
+
+
+def test_spanner_projection_schema_uses_interleaved_fragments_and_commit_timestamps() -> None:
+    ddl = SpannerProjectionStateStore.projection_schema_ddl()
+
+    assert "CREATE TABLE projection_states" in ddl[0]
+    assert "allow_commit_timestamp=true" in ddl[0]
+    assert "INTERLEAVE IN PARENT projection_states ON DELETE CASCADE" in ddl[1]
+    assert "allow_commit_timestamp=true" in ddl[1]
 
 
 def test_spanner_store_ignores_older_fragment_versions() -> None:
@@ -448,3 +485,69 @@ def test_projection_builder_rejects_in_memory_state_in_prod() -> None:
             ],
             environment="prod",
         )
+
+
+def test_projection_builder_emits_time_to_completeness_when_entity_becomes_publishable() -> None:
+    telemetry = InMemoryTelemetrySink()
+    builder = ProjectionBuilder(
+        [
+            DependencyPolicy(
+                entity_type="customerDocument",
+                rules=[
+                    DependencyRule(owner="document_core", required=True),
+                    DependencyRule(owner="customer_profile", required=True),
+                ],
+            )
+        ],
+        telemetry_sink=telemetry,
+    )
+    now = datetime.now(UTC)
+    builder.upsert(
+        CanonicalDomainEvent(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            logical_entity_id="doc-telemetry",
+            tenant_id="tenant-1",
+            source_technology=SourceTechnology.COSMOS,
+            source_version=1,
+            fragment_owner="document_core",
+            payload={"title": "First"},
+            event_time_utc=now - timedelta(seconds=5),
+        ),
+        now_utc=now - timedelta(seconds=5),
+    )
+
+    decision = builder.upsert(
+        CanonicalDomainEvent(
+            domain_name="customer_documents",
+            entity_type="customerDocument",
+            logical_entity_id="doc-telemetry",
+            tenant_id="tenant-1",
+            source_technology=SourceTechnology.ALLOYDB,
+            source_version=2,
+            fragment_owner="customer_profile",
+            payload={"customerName": "Apurva"},
+            event_time_utc=now,
+        ),
+        now_utc=now,
+    )
+
+    assert decision.publish is True
+    assert telemetry.counters[
+        (
+            "projection.completeness.achieved",
+            (
+                ("completeness_status", "complete"),
+                ("domain_name", "customer_documents"),
+                ("entity_type", "customerDocument"),
+                ("status", "published"),
+            ),
+        )
+    ] == 1
+    assert any(timing.name == "projection.builder.upsert" for timing in telemetry.timings)
+    completeness_timings = [
+        timing for timing in telemetry.timings if timing.name == "projection.time_to_completeness"
+    ]
+    assert len(completeness_timings) == 1
+    assert 4900 <= completeness_timings[0].duration_ms <= 5100
+    assert any(event["event_type"] == "projection_completeness_achieved" for event in telemetry.events)

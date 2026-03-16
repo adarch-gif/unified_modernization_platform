@@ -163,14 +163,14 @@ class _RemoteBucketStore(RemoteBucketStore):
             return snapshot.buckets
 
         parent_documents = self._documents_for_bucket(parent_bucket_id)
-        child_groups = self._engine._split_documents(  # type: ignore[attr-defined]
+        child_groups = self._engine._split_documents(
             parent_documents,
             parent_bucket_id=parent_bucket_id,
             depth=depth,
             fanout=fanout,
         )
         return {
-            child_bucket_id: self._engine._digest_bucket(child_bucket_id, bucket_documents)  # type: ignore[attr-defined]
+            child_bucket_id: self._engine._digest_bucket(child_bucket_id, bucket_documents)
             for child_bucket_id, bucket_documents in child_groups.items()
         }
 
@@ -199,13 +199,13 @@ class _RemoteBucketStore(RemoteBucketStore):
             return {
                 document_id: fingerprint
                 for document_id, fingerprint in self._documents.items()
-                if self._engine._bucket_id(document_id, self._root_bucket_count) == bucket_id  # type: ignore[attr-defined]
+                if self._engine._bucket_id(document_id, self._root_bucket_count) == bucket_id
             }
 
         parent_bucket_id = bucket_id.rsplit("/child-", 1)[0]
         depth = bucket_id.count("/child-")
         parent_documents = self._documents_for_bucket(parent_bucket_id)
-        child_groups = self._engine._split_documents(  # type: ignore[attr-defined]
+        child_groups = self._engine._split_documents(
             parent_documents,
             parent_bucket_id=parent_bucket_id,
             depth=depth,
@@ -216,7 +216,7 @@ class _RemoteBucketStore(RemoteBucketStore):
         return {
             document_id
             for document_id in self._documents
-            if parent_bucket_id in self._engine._split_documents(  # type: ignore[attr-defined]
+            if parent_bucket_id in self._engine._split_documents(
                 {document_id: self._documents[document_id]},
                 parent_bucket_id=parent_bucket_id,
                 depth=depth,
@@ -248,6 +248,35 @@ def test_remote_bucketed_reconciliation_fetches_paginated_documents_only_on_mism
         max_recursive_depth=2,
         target_leaf_size=1,
         page_size=1,
+    )
+
+    codes = {finding.code for finding in report.findings}
+    assert "bucket_mismatch" in codes
+    assert "bucket_checksum_drift" in codes
+
+
+def test_remote_bucketed_reconciliation_handles_many_mismatched_buckets() -> None:
+    engine = BucketedReconciliationEngine()
+    source_store = _RemoteBucketStore(
+        {
+            f"doc-{index}": DocumentFingerprint(checksum=f"source-{index}")
+            for index in range(32)
+        }
+    )
+    target_store = _RemoteBucketStore(
+        {
+            f"doc-{index}": DocumentFingerprint(checksum=f"target-{index}")
+            for index in range(32)
+        }
+    )
+
+    report = engine.compare_remote_stores(
+        source_store,
+        target_store,
+        bucket_count=1,
+        max_recursive_depth=5,
+        target_leaf_size=1,
+        page_size=4,
     )
 
     codes = {finding.code for finding in report.findings}

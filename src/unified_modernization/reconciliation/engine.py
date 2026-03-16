@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable
 from typing import Protocol
 
@@ -511,9 +511,14 @@ class BucketedReconciliationEngine:
         fanout: int,
     ) -> list[ReconciliationFinding]:
         findings: list[ReconciliationFinding] = []
-        for bucket_id in bucket_ids:
-            source_bucket = source_snapshot.buckets.get(bucket_id)
-            target_bucket = target_snapshot.buckets.get(bucket_id)
+        work_queue: deque[tuple[str, int, dict[str, BucketDigest], dict[str, BucketDigest]]] = deque(
+            (bucket_id, depth, source_snapshot.buckets, target_snapshot.buckets)
+            for bucket_id in bucket_ids
+        )
+        while work_queue:
+            bucket_id, bucket_depth, source_buckets, target_buckets = work_queue.popleft()
+            source_bucket = source_buckets.get(bucket_id)
+            target_bucket = target_buckets.get(bucket_id)
             if source_bucket is None or target_bucket is None:
                 continue
 
@@ -521,7 +526,7 @@ class BucketedReconciliationEngine:
                 source_bucket.active_count + source_bucket.deleted_count,
                 target_bucket.active_count + target_bucket.deleted_count,
             )
-            if depth >= max_recursive_depth or max_bucket_documents <= target_leaf_size:
+            if bucket_depth >= max_recursive_depth or max_bucket_documents <= target_leaf_size:
                 source_documents = self._fetch_bucket_documents_remote(
                     source_store,
                     bucket_id,
@@ -544,24 +549,14 @@ class BucketedReconciliationEngine:
             source_children = source_store.fetch_bucket_digests(
                 bucket_count=fanout,
                 parent_bucket_id=bucket_id,
-                depth=depth,
+                depth=bucket_depth,
                 fanout=fanout,
             )
             target_children = target_store.fetch_bucket_digests(
                 bucket_count=fanout,
                 parent_bucket_id=bucket_id,
-                depth=depth,
+                depth=bucket_depth,
                 fanout=fanout,
-            )
-            child_source_snapshot = BucketedStoreSnapshot(
-                name=source_snapshot.name,
-                bucket_count=fanout,
-                buckets=source_children,
-            )
-            child_target_snapshot = BucketedStoreSnapshot(
-                name=target_snapshot.name,
-                bucket_count=fanout,
-                buckets=target_children,
             )
             child_bucket_ids: list[str] = []
             for child_bucket_id in sorted(set(source_children).union(target_children)):
@@ -590,20 +585,15 @@ class BucketedReconciliationEngine:
                         )
                     )
                     child_bucket_ids.append(child_bucket_id)
-            findings.extend(
-                self._drill_down_remote(
-                    source_store,
-                    target_store,
-                    child_source_snapshot,
-                    child_target_snapshot,
-                    bucket_ids=child_bucket_ids,
-                    depth=depth + 1,
-                    max_recursive_depth=max_recursive_depth,
-                    target_leaf_size=target_leaf_size,
-                    page_size=page_size,
-                    fanout=fanout,
+            for child_bucket_id in child_bucket_ids:
+                work_queue.append(
+                    (
+                        child_bucket_id,
+                        bucket_depth + 1,
+                        source_children,
+                        target_children,
+                    )
                 )
-            )
         return findings
 
     def _compare_document_maps(

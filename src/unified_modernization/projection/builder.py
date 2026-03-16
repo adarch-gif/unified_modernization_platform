@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,6 +19,7 @@ from unified_modernization.contracts.projection import (
     PublicationDecision,
     SearchDocument,
 )
+from unified_modernization.observability.telemetry import NoopTelemetrySink, TelemetryEvent, TelemetrySink
 from unified_modernization.projection.store import InMemoryProjectionStateStore, ProjectionStateStore
 
 
@@ -32,6 +34,7 @@ class ProjectionBuilder:
         policies: list[DependencyPolicy],
         state_store: ProjectionStateStore | None = None,
         environment: str = "dev",
+        telemetry_sink: TelemetrySink | None = None,
     ) -> None:
         self._policies: dict[tuple[str | None, str], DependencyPolicy] = {}
         for policy in policies:
@@ -47,6 +50,7 @@ class ProjectionBuilder:
         ):
             raise ValueError("in-memory projection state is not allowed outside local/dev/test environments")
         self._state_store = resolved_state_store
+        self._telemetry_sink = telemetry_sink or NoopTelemetrySink()
 
     def _resolve_policy(self, *, domain_name: str, entity_type: str) -> DependencyPolicy:
         exact = self._policies.get((domain_name, entity_type))
@@ -84,17 +88,135 @@ class ProjectionBuilder:
             delete_flag=event.change_type == ChangeType.DELETE,
         )
 
-        result = self._state_store.mutate_entity(
-            key,
-            lambda entity: self._mutate_entity(
-                entity=entity,
-                incoming=incoming,
-                event=event,
+        state_capture: dict[str, ProjectionStateRecord | None] = {"previous": None}
+
+        def capture_previous_state(state: ProjectionStateRecord | None) -> None:
+            state_capture["previous"] = None if state is None else state.model_copy(deep=True)
+
+        with self._telemetry_sink.start_span(
+            "projection.builder.upsert",
+            attributes={
+                "domain_name": event.domain_name,
+                "entity_type": event.entity_type,
+                "fragment_owner": event.fragment_owner,
+                "change_type": event.change_type.value,
+            },
+        ) as span:
+            result = self._state_store.mutate_entity(
+                key,
+                lambda entity: self._capture_and_mutate_entity(
+                    entity=entity,
+                    incoming=incoming,
+                    event=event,
+                    now=now,
+                    policy=policy,
+                    previous_state_ref=capture_previous_state,
+                ),
+            )
+            self._telemetry_sink.increment(
+                "projection.upsert.total",
+                tags={
+                    "domain_name": event.domain_name,
+                    "entity_type": event.entity_type,
+                    "change_type": event.change_type.value,
+                    "published": str(result.decision.publish).lower(),
+                },
+            )
+            self._record_completion_telemetry(
+                trace_id=span.trace_id,
+                previous_state=state_capture["previous"],
+                result=result,
                 now=now,
-                policy=policy,
-            ),
-        )
+            )
         return result.decision
+
+    def _capture_and_mutate_entity(
+        self,
+        *,
+        entity: ProjectionEntityRecord,
+        incoming: FragmentRecord,
+        event: CanonicalDomainEvent,
+        now: datetime,
+        policy: DependencyPolicy,
+        previous_state_ref: Callable[[ProjectionStateRecord | None], None],
+    ) -> ProjectionMutationResult:
+        previous_state_ref(entity.state)
+        return self._mutate_entity(
+            entity=entity,
+            incoming=incoming,
+            event=event,
+            now=now,
+            policy=policy,
+        )
+
+    def _record_completion_telemetry(
+        self,
+        *,
+        trace_id: str,
+        previous_state: ProjectionStateRecord | None,
+        result: ProjectionMutationResult,
+        now: datetime,
+    ) -> None:
+        state = result.decision.state
+        if not self._is_completion_transition(previous_state, state):
+            return
+
+        duration_ms = self._time_to_completeness_ms(result.entity, now)
+        if duration_ms is None:
+            return
+
+        tags = {
+            "domain_name": state.domain_name,
+            "entity_type": state.entity_type,
+            "status": state.status.value,
+            "completeness_status": state.completeness_status.value,
+        }
+        self._telemetry_sink.increment("projection.completeness.achieved", tags=tags)
+        self._telemetry_sink.record_timing(
+            "projection.time_to_completeness",
+            duration_ms,
+            tags=tags,
+            trace_id=trace_id,
+        )
+        self._telemetry_sink.emit(
+            TelemetryEvent(
+                event_type="projection_completeness_achieved",
+                trace_id=trace_id,
+                attributes={
+                    "tenant_id": state.tenant_id,
+                    "domain_name": state.domain_name,
+                    "entity_type": state.entity_type,
+                    "logical_entity_id": state.logical_entity_id,
+                    "status": state.status.value,
+                    "prior_status": None if previous_state is None else previous_state.status.value,
+                    "projection_version": state.projection_version,
+                    "time_to_completeness_ms": duration_ms,
+                },
+            )
+        )
+
+    @staticmethod
+    def _is_completion_transition(
+        previous_state: ProjectionStateRecord | None,
+        current_state: ProjectionStateRecord,
+    ) -> bool:
+        terminal_states = {ProjectionStatus.PUBLISHED, ProjectionStatus.DELETED}
+        if current_state.status not in terminal_states:
+            return False
+        if previous_state is None:
+            return True
+        return previous_state.status not in terminal_states
+
+    @staticmethod
+    def _time_to_completeness_ms(
+        entity: ProjectionEntityRecord,
+        now: datetime,
+    ) -> float | None:
+        fragment_event_times = [fragment.event_time_utc for fragment in entity.fragments.values()]
+        if not fragment_event_times:
+            return None
+        earliest_fragment_time = min(fragment_event_times).astimezone(UTC)
+        return max(0.0, (now - earliest_fragment_time).total_seconds() * 1000)
 
     def _mutate_entity(
         self,
