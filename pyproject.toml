@@ -13,12 +13,12 @@ dependencies = [
   "PyYAML>=6.0",
   "starlette>=0.37",
   "uvicorn>=0.30",
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
-  "httpx>=0.27",
   "mypy>=1.11",
   "ruff>=0.6",
   "bandit>=1.8",
@@ -26,6 +26,11 @@ dev = [
 gcp = [
   "google-cloud-spanner>=3.49,<4",
   "google-cloud-firestore>=2.18,<3",
+]
+telemetry = [
+  "opentelemetry-api>=1.27,<2",
+  "opentelemetry-sdk>=1.27,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.27,<2",
 ]
 
 [tool.pytest.ini_options]

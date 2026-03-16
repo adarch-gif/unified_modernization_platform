@@ -83,6 +83,7 @@ The gateway also now supports:
 - automatic canary freeze when judged regression exceeds configured thresholds
 - best-effort shadow execution so primary-serving traffic survives shadow-only failures
 - resilient backend wrappers for timeout, retry, and circuit-breaker behavior
+- concrete Azure AI Search and Elasticsearch query backends that fit the gateway `SearchBackend` protocol
 - bootstrap-time enforcement so production startup does not silently use raw backends or no-op telemetry
 
 ### Search evaluation
@@ -135,12 +136,15 @@ This is intentionally Merkle-like rather than a naive full-snapshot compare. The
 The repo now includes operational scaffolding around the core architecture:
 
 - `projection/runtime.py` adds backpressure control, priority-aware bypass for completion traffic, and dead-letter handling around projection mutation
+- `projection/publisher.py` adds an Elasticsearch publisher with external versioning, tenant-aware alias routing, and bulk publish support
 - `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
 - `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
+- `observability/opentelemetry.py` bridges the telemetry protocol into OpenTelemetry-compatible traces and metrics
 - `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions
 - `gateway/asgi.py` adds API-key protection, bounded request parsing, and explicit `422` translation failures for the exposed gateway endpoints
 - `config/loader.py` removes handwritten per-domain Python policy construction
+- `adapters/` now includes concrete Firestore outbox, Cosmos change feed, Debezium-style CDC, and Spanner change-stream normalizers
 
 ## Production evolution path
 
-The code in this repo is still a starter, but it now includes the main scale seams. The next production step is wiring the Spanner store to a real deployed database, then wiring real adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
+The code in this repo is still a starter, but it now includes the main scale seams plus concrete query and CDC integrations. The next production step is wiring the Spanner store, Firestore cutover store, concrete search clients, and publisher to real deployed environments, then filling in any remaining domain-specific CDC envelopes or source-side enrichments.

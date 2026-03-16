@@ -30,21 +30,29 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Backfill coordinator with side-load to stream-handoff planning
 - Backfill checkpointing support for resumable bulk runs
 - Firestore outbox normalization model
+- Cosmos DB change feed normalization adapter
+- Debezium-style CDC normalization adapter for Azure SQL and AlloyDB event streams
+- Spanner change-stream normalization adapter
 - Domain config loader for YAML-driven onboarding
 - Reconciliation engine with tenant, cohort, and delete-aware validation
 - Recursive bucketed anti-entropy reconciliation for hash-first drift detection
 - Projection runtime wrapper with backpressure and dead-letter handling
 - Priority-aware backpressure bypass for repair and pending-entity completion traffic
+- Azure AI Search and Elasticsearch HTTP query clients
+- Elasticsearch document publisher with external versioning and tenant-aware alias routing
+- Optional projection runtime publisher hook for search-index delivery and replay on publish failure
 - Observability primitives for structured events, counters, timings, and spans
+- OpenTelemetry-compatible telemetry sink with OTLP HTTP export bootstrap
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
 ## What is not implemented yet
 
-- Real Azure, GCP, or Elasticsearch credentials and runtime integration
+- Real Azure, GCP, or Elasticsearch credentials and deployed runtime wiring
 - Domain-specific schemas and mappings
 - Full consumer-specific OData parity
 - Production IaC for all environments
+- Remaining domain-specific CDC envelopes and source-specific enrichments beyond the built-in Cosmos, Firestore, Debezium-style, and Spanner adapter set
 - Final Spanner versus Firestore versus AlloyDB decisions by domain
 
 ## Repository layout
@@ -143,6 +151,10 @@ But:
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
 - `gateway/service.py`
   Canary-aware search flow that can automatically freeze Elastic ramp-up when judged shadow quality regresses
+- `gateway/clients.py`
+  Concrete Azure AI Search and Elasticsearch query backends that fit the gateway `SearchBackend` protocol
+- `gateway/bootstrap.py`
+  Production-safe gateway startup plus config-driven construction for the concrete Azure and Elasticsearch clients
 - `gateway/asgi.py`
   API-key middleware, request-size limits, explicit `422` translation errors, and a testable ASGI app builder
 - `gateway/resilience.py`
@@ -151,22 +163,26 @@ But:
   Production-safe gateway startup that wraps raw backends and rejects silent telemetry in non-dev environments
 - `observability/telemetry.py`
   Structured telemetry events, counters, timings, and trace-like spans
+- `observability/opentelemetry.py`
+  OpenTelemetry-compatible telemetry sink that maps the platform telemetry protocol to OTLP-ready traces and metrics
 - `reconciliation/engine.py`
   Snapshot reconciliation plus recursive bucketed anti-entropy, remote paginated bucket fetch, and bucket-level drill-down
 - `routing/tenant_policy.py`
   Shared-index versus dedicated-index alias routing policy plus whale-tenant ingestion partitioning
 - `projection/bootstrap.py`
-  Runtime bootstrap helper that forbids in-memory projection state outside local/dev/test
+  Runtime bootstrap helper that forbids in-memory projection state outside local/dev/test and can build the Elasticsearch publisher from config
 - `projection/runtime.py`
-  Backpressure and DLQ wrapper around projection processing
+  Backpressure, DLQ handling, and optional search-index publishing around projection processing
+- `projection/publisher.py`
+  Elasticsearch publisher with external versioning, tenant-aware alias routing, and bulk indexing support
 
 ## Immediate next steps
 
-1. Wire `SpannerProjectionStateStore` to a real `google-cloud-spanner` database in non-local environments and provision the published DDL.
-2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
-3. Add live Azure Search and Elasticsearch query clients behind the gateway and a real Elasticsearch index writer with external versioning.
-4. Route telemetry into OpenTelemetry exporters or a real metrics backend instead of in-memory/logger sinks.
-5. Replace local pilot-grade durability layers with managed production stores and secret-provider integration where required.
+1. Wire `SpannerProjectionStateStore`, `FirestoreCutoverStateStore`, and the concrete search clients to real cloud credentials and managed environments.
+2. Add any remaining domain-specific CDC envelopes and source-specific enrichments not covered by the built-in Cosmos, Firestore, Debezium-style, and Spanner adapters.
+3. Route telemetry into OpenTelemetry exporters or a real metrics backend instead of in-memory/logger sinks.
+4. Replace local pilot-grade durability layers with managed production stores and secret-provider integration where required.
+5. Add load and replay testing around the concrete search-client and publisher paths before live shadow traffic.
 
 ## Status
 

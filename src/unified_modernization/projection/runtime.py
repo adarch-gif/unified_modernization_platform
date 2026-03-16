@@ -9,6 +9,7 @@ from unified_modernization.contracts.events import CanonicalDomainEvent, ChangeT
 from unified_modernization.contracts.projection import ProjectionStatus, PublicationDecision
 from unified_modernization.observability.telemetry import NoopTelemetrySink, TelemetryEvent, TelemetrySink
 from unified_modernization.projection.builder import ProjectionBuilder
+from unified_modernization.projection.publisher import SearchDocumentPublisher
 
 
 class DeadLetterRecord(BaseModel):
@@ -64,6 +65,7 @@ class BackpressureController:
 class ProjectionRuntimeResult(BaseModel):
     accepted: bool
     decision: PublicationDecision | None = None
+    publish_result: dict[str, object] | None = None
     throttled: bool = False
     dead_lettered: bool = False
     reason_code: str | None = None
@@ -78,11 +80,13 @@ class ProjectionRuntime:
         *,
         dead_letter_queue: DeadLetterQueue | None = None,
         backpressure_controller: BackpressureController | None = None,
+        document_publisher: SearchDocumentPublisher | None = None,
         telemetry_sink: TelemetrySink | None = None,
     ) -> None:
         self._projection_builder = projection_builder
         self._dead_letter_queue = dead_letter_queue or InMemoryDeadLetterQueue()
         self._backpressure_controller = backpressure_controller or BackpressureController()
+        self._document_publisher = document_publisher
         self._telemetry_sink = telemetry_sink or NoopTelemetrySink()
 
     def process(
@@ -161,6 +165,52 @@ class ProjectionRuntime:
                 reason_code="projection_failed",
             )
 
+        publish_result: dict[str, object] | None = None
+        if decision.publish and decision.document is not None and self._document_publisher is not None:
+            try:
+                publish_result = self._document_publisher.publish(
+                    decision.document,
+                    trace_id=event.trace_id,
+                )
+            except Exception as exc:  # pragma: no cover - exercised through tests
+                record = DeadLetterRecord(
+                    event_id=event.event_id,
+                    tenant_id=event.tenant_id,
+                    domain_name=event.domain_name,
+                    entity_type=event.entity_type,
+                    logical_entity_id=event.logical_entity_id,
+                    trace_id=event.trace_id,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    payload={
+                        "event": event.model_dump(mode="json"),
+                        "document": decision.document.model_dump(mode="json"),
+                    },
+                )
+                self._dead_letter_queue.publish(record)
+                self._telemetry_sink.increment(
+                    "projection.publish_failed",
+                    tags={"domain_name": event.domain_name, "entity_type": event.entity_type},
+                )
+                self._telemetry_sink.emit(
+                    TelemetryEvent(
+                        event_type="projection_publish_failed",
+                        severity="error",
+                        trace_id=event.trace_id,
+                        attributes={
+                            "tenant_id": event.tenant_id,
+                            "logical_entity_id": event.logical_entity_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                )
+                return ProjectionRuntimeResult(
+                    accepted=False,
+                    decision=decision,
+                    dead_lettered=True,
+                    reason_code="publish_failed",
+                )
+
         metric_name = "projection.published" if decision.publish else "projection.pending"
         self._telemetry_sink.increment(
             metric_name,
@@ -169,6 +219,7 @@ class ProjectionRuntime:
         return ProjectionRuntimeResult(
             accepted=True,
             decision=decision,
+            publish_result=publish_result,
             reason_code="processed",
         )
 

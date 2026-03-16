@@ -11,9 +11,9 @@
 ## Phase 1
 
 - wire the implemented Spanner-backed projection state store to real GCP environments
-- implement real source adapters
-- implement real Elasticsearch write client
-- implement gateway clients for Azure Search and Elasticsearch
+- complete any remaining real source adapters or enrichers beyond the built-in Firestore outbox, Cosmos change feed, Debezium-style CDC, and Spanner change-stream paths
+- wire the implemented Elasticsearch write client to live aliases and secret-managed credentials
+- wire the implemented gateway clients for Azure Search and Elasticsearch to live credentials and domain mappings
 - wire tenant alias routing and ingestion partition policies into live gateway and ingestion clients
 - wire resilient backend wrappers and real telemetry exporters into live gateway startup
 - implement batch side-load path, checkpoint persistence, and source-watermark capture for backfill
