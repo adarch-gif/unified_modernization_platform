@@ -1,0 +1,58 @@
+project_id = "my-gcp-project"
+region     = "us-central1"
+
+spanner_config     = "regional-us-central1"
+firestore_location = "us-central"
+
+gateway_image = "us-central1-docker.pkg.dev/my-gcp-project/ump-containers/unified-modernization-platform:latest"
+
+environment                = "prod"
+gateway_mode               = "shadow"
+canary_percent             = 0
+shadow_observation_percent = 25
+telemetry_mode             = "logger"
+telemetry_service_name     = "unified-modernization-platform"
+
+azure_search_endpoint      = "https://my-azure-search.search.windows.net"
+azure_search_default_index = "customer-search"
+azure_search_auth_mode     = "api_key"
+
+elasticsearch_endpoint      = "https://my-elastic-cluster.example.com"
+elasticsearch_default_index = "customerdocument-shared-a-read"
+elasticsearch_auth_mode     = "api_key"
+
+field_map = {
+  Status = "status"
+  Tier   = "tier"
+  Region = "region"
+}
+
+dedicated_tenants = ["tenant-whale-a"]
+
+publisher_endpoint  = "https://my-elastic-cluster.example.com"
+publisher_auth_mode = "api_key"
+publisher_refresh   = "false"
+publisher_write_alias_map = {
+  customerDocument = "customerdocument-shared-a-write"
+}
+
+secret_values = {
+  gateway_api_keys         = "pilot-key-1,pilot-key-2"
+  azure_search_credential  = "replace-with-azure-key-or-bearer-token"
+  elasticsearch_credential = "replace-with-elastic-key-or-bearer-token"
+  publisher_credential     = "replace-with-publisher-key-or-bearer-token"
+}
+
+# Alternative: create the secret versions out of band and reference them here.
+# Do not set the same key in both secret_values and secret_version_refs.
+# For a first deployment without Terraform-managed secret payloads:
+# 1. set deploy_gateway_service = false and deploy_harness_job = false
+# 2. apply once to create the secret containers
+# 3. add versions in Secret Manager
+# 4. set secret_version_refs and re-enable the workloads
+# secret_version_refs = {
+#   gateway_api_keys         = "latest"
+#   azure_search_credential  = "latest"
+#   elasticsearch_credential = "latest"
+#   publisher_credential     = "latest"
+# }

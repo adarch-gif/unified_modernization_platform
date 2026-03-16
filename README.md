@@ -22,6 +22,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Search Gateway service and OData to Elasticsearch translator
 - ASGI gateway middleware with API-key protection and request-size guard
 - ASGI app builder with production-aware auth, bounded request parsing, and explicit `422` OData translation failures
+- HTTP gateway app that exposes the routed `SearchGatewayService` on `/search`
 - Search evaluation harness with live overlap and offline judged relevance metrics
 - Operational shadow quality gate with telemetry-ready events and canary auto-freeze on judged regression
 - Best-effort shadow and canary comparison paths that do not fail the primary request on shadow-only errors
@@ -44,6 +45,8 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Observability primitives for structured events, counters, timings, and spans
 - OpenTelemetry-compatible telemetry sink with OTLP HTTP export bootstrap
 - Gateway smoke/load harness with JSON or JSONL case playback and latency/error reporting
+- Docker packaging for Cloud Run deployment
+- Terraform stack for pilot-grade GCP infrastructure deployment
 - Example config and implementation roadmap
 - Unit tests for the highest-risk logic
 
@@ -52,7 +55,7 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Real Azure, GCP, or Elasticsearch credentials and deployed runtime wiring
 - Domain-specific schemas and mappings
 - Full consumer-specific OData parity
-- Production IaC for all environments
+- Fully automated multi-environment CI/CD rollout pipelines
 - Remaining domain-specific CDC envelopes and source-specific enrichments beyond the built-in Cosmos, Firestore, Debezium-style, and Spanner adapter set
 - Final Spanner versus Firestore versus AlloyDB decisions by domain
 
@@ -72,8 +75,11 @@ docs/
   ARCHITECTURE.md
   IMPLEMENTATION_ROADMAP.md
   DOMAIN_ONBOARDING_TEMPLATE.md
+  TERRAFORM_DEPLOYMENT.md
 examples/
   domain_config.yaml
+infra/
+  terraform/        GCP deployment stack for pilot environments
 tests/
   Projection, gateway, cutover, and reconciliation tests
 ```
@@ -92,10 +98,16 @@ python -m pip install -e .[dev]
 python -m pytest -q
 ```
 
-### Run the lightweight ASGI app
+### Run the translation-only ASGI app
 
 ```powershell
 uvicorn unified_modernization.gateway.asgi:app --app-dir src --reload
+```
+
+### Run the full HTTP search gateway locally
+
+```powershell
+uvicorn unified_modernization.gateway.http_api:app --app-dir src --reload
 ```
 
 ### Run the gateway smoke/load harness
@@ -130,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_gateway_harness.ps1 `
   -Iterations 20
 ```
 
-Start from [gateway_runtime.env.template](C:\Users\ados1\unified-modernization-platform\examples\gateway_runtime.env.template) and fill in the real endpoint and credential values locally.
+Start from [gateway_runtime.env.template](examples/gateway_runtime.env.template) and fill in the real endpoint and credential values locally.
 
 ### Health endpoint
 
@@ -194,6 +206,8 @@ But:
   Smoke/load runner for the concrete gateway path with concurrency, latency percentiles, and shadow-signal reporting
 - `gateway/asgi.py`
   API-key middleware, request-size limits, explicit `422` translation errors, and a testable ASGI app builder
+- `gateway/http_api.py`
+  Deployable HTTP surface for `SearchGatewayService`, including `/search`, `/translate`, and `/health`
 - `gateway/resilience.py`
   Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
 - `observability/telemetry.py`
@@ -214,6 +228,8 @@ But:
   Backpressure, DLQ handling, and optional search-index publishing around projection processing
 - `projection/publisher.py`
   Elasticsearch publisher with external versioning, tenant-aware alias routing, and bulk indexing support
+- `infra/terraform`
+  GCP infrastructure stack for Cloud Run, Spanner, Firestore, Pub/Sub, Artifact Registry, and Secret Manager
 
 ## Immediate next steps
 

@@ -14,3 +14,13 @@ htmlcov/
 .DS_Store
 artifacts/
 *.env.local
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
