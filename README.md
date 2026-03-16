@@ -15,15 +15,19 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Pluggable projection state store with durable SQLite implementation
 - Spanner-backed projection state store contract and schema-driven implementation path
 - Independent backend and search cutover state machines
+- Persisted cutover transition store with restart-safe rehydration
 - Tenant routing policy engine and alias-routing model
 - Whale-tenant ingestion partition policy
 - Search Gateway service and OData to Elasticsearch translator
+- ASGI gateway middleware with API-key protection and request-size guard
 - Search evaluation harness with live overlap and offline judged relevance metrics
 - Operational shadow quality gate with telemetry-ready events
 - Resilient search backend wrapper with timeout, retry, and circuit-breaker primitives
 - Gateway bootstrap that makes resilient wrappers and telemetry explicit at startup
 - Backfill coordinator with side-load to stream-handoff planning
+- Backfill checkpointing support for resumable bulk runs
 - Firestore outbox normalization model
+- Domain config loader for YAML-driven onboarding
 - Reconciliation engine with tenant, cohort, and delete-aware validation
 - Recursive bucketed anti-entropy reconciliation for hash-first drift detection
 - Projection runtime wrapper with backpressure and dead-letter handling
@@ -46,6 +50,7 @@ src/unified_modernization/
   adapters/         Source adapter interfaces and helpers
   contracts/        Canonical event and projection models
   cutover/          Backend and search cutover state machines
+  config/           YAML-driven domain onboarding loader
   gateway/          Search Gateway logic and ASGI app
   projection/       Projection builder and state handling
   reconciliation/   Reconciliation models and comparison logic
@@ -123,9 +128,15 @@ But:
 - `projection/store.py`
   Durable control-plane seam with `InMemoryProjectionStateStore`, `SqliteProjectionStateStore`, and `SpannerProjectionStateStore`
 - `backfill/coordinator.py`
-  Bulk side-load and stream handoff planner so historical backfill does not depend on the real-time bus
+  Bulk side-load, typed watermarks, resumable checkpoints, and stream handoff planning
+- `cutover/state_machine.py`
+  Persisted transition events with restart-safe cutover state rehydration
+- `config/loader.py`
+  YAML loader that turns domain onboarding config into runtime dependency policies
 - `gateway/evaluation.py`
   Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
+- `gateway/asgi.py`
+  API-key middleware, request-size limits, and explicit error handling for the lightweight gateway surface
 - `gateway/resilience.py`
   Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
 - `gateway/bootstrap.py`
@@ -147,7 +158,7 @@ But:
 2. Add real source adapters for Azure SQL, Cosmos, Spanner, Firestore outbox, and AlloyDB CDC.
 3. Add live Azure Search and Elasticsearch query clients behind the gateway and a real Elasticsearch index writer with external versioning.
 4. Route telemetry into OpenTelemetry exporters or a real metrics backend instead of in-memory/logger sinks.
-5. Add auth, secret-provider integration, and production replay/rehydration workers for pending projections.
+5. Replace local pilot-grade durability layers with managed production stores and secret-provider integration where required.
 
 ## Status
 

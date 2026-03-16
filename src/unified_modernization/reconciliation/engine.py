@@ -83,6 +83,7 @@ class ReconciliationFinding(BaseModel):
     code: str
     message: str
     affected_ids: list[str] = Field(default_factory=list)
+    total_affected: int = 0
 
 
 class ReconciliationReport(BaseModel):
@@ -114,8 +115,9 @@ class ReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="missing_documents",
-                    message=f"{len(missing)} documents missing from target",
+                    message=f"{len(missing)} documents missing from target (showing first 25)",
                     affected_ids=missing[:25],
+                    total_affected=len(missing),
                 )
             )
 
@@ -125,8 +127,9 @@ class ReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="unexpected_documents",
-                    message=f"{len(extras)} extra documents present in target",
+                    message=f"{len(extras)} extra documents present in target (showing first 25)",
                     affected_ids=extras[:25],
+                    total_affected=len(extras),
                 )
             )
 
@@ -140,8 +143,9 @@ class ReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="checksum_drift",
-                    message=f"{len(drifted)} documents differ between source and target",
+                    message=f"{len(drifted)} documents differ between source and target (showing first 25)",
                     affected_ids=drifted[:25],
+                    total_affected=len(drifted),
                 )
             )
 
@@ -151,8 +155,9 @@ class ReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="delete_state_mismatch",
-                    message=f"{len(delete_mismatches)} documents have mismatched delete state",
+                    message=f"{len(delete_mismatches)} documents have mismatched delete state (showing first 25)",
                     affected_ids=delete_mismatches[:25],
+                    total_affected=len(delete_mismatches),
                 )
             )
 
@@ -197,6 +202,7 @@ class ReconciliationEngine:
                     f"{source.name} and {target.name}"
                 ),
                 affected_ids=mismatched_scopes[:25],
+                total_affected=len(mismatched_scopes),
             )
         ]
 
@@ -269,6 +275,7 @@ class BucketedReconciliationEngine:
                         code="bucket_missing",
                         message=f"bucket {bucket_id} missing from one side of reconciliation",
                         affected_ids=[bucket_id],
+                        total_affected=1,
                     )
                 )
                 mismatched_buckets.append(bucket_id)
@@ -280,6 +287,7 @@ class BucketedReconciliationEngine:
                         code="bucket_mismatch",
                         message=f"bucket {bucket_id} hash or counts differ between source and target",
                         affected_ids=[bucket_id],
+                        total_affected=1,
                     )
                 )
                 mismatched_buckets.append(bucket_id)
@@ -350,6 +358,7 @@ class BucketedReconciliationEngine:
                         code="bucket_drilldown_unavailable",
                         message=f"bucket {bucket_id} differs but detailed documents were not provided",
                         affected_ids=[bucket_id],
+                        total_affected=1,
                     )
                 )
                 continue
@@ -416,8 +425,9 @@ class BucketedReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="bucket_missing_documents",
-                    message=f"{len(missing_ids)} documents missing in mismatched bucket {bucket_id}",
+                    message=f"{len(missing_ids)} documents missing in mismatched bucket {bucket_id} (showing first 25)",
                     affected_ids=missing_ids[:25],
+                    total_affected=len(missing_ids),
                 )
             )
 
@@ -427,8 +437,9 @@ class BucketedReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="bucket_unexpected_documents",
-                    message=f"{len(unexpected_ids)} extra documents in mismatched bucket {bucket_id}",
+                    message=f"{len(unexpected_ids)} extra documents in mismatched bucket {bucket_id} (showing first 25)",
                     affected_ids=unexpected_ids[:25],
+                    total_affected=len(unexpected_ids),
                 )
             )
 
@@ -443,8 +454,9 @@ class BucketedReconciliationEngine:
                 ReconciliationFinding(
                     severity="critical",
                     code="bucket_checksum_drift",
-                    message=f"{len(drifted_ids)} documents drifted in mismatched bucket {bucket_id}",
+                    message=f"{len(drifted_ids)} documents drifted in mismatched bucket {bucket_id} (showing first 25)",
                     affected_ids=drifted_ids[:25],
+                    total_affected=len(drifted_ids),
                 )
             )
         return findings

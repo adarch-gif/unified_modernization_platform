@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import hashlib
 
 from pydantic import BaseModel
 
@@ -43,7 +44,11 @@ class TenantPolicyEngine:
                 read_alias=f"{base}-read",
                 routing_key=None,
             )
-        bucket = TenantRoutingClass.SHARED_A if sum(map(ord, tenant_id)) % 2 == 0 else TenantRoutingClass.SHARED_B
+        bucket = (
+            TenantRoutingClass.SHARED_A
+            if self._stable_hash(tenant_id) % 2 == 0
+            else TenantRoutingClass.SHARED_B
+        )
         return TenantPolicy(
             tenant_id=tenant_id,
             routing_class=bucket,
@@ -51,6 +56,10 @@ class TenantPolicyEngine:
             read_alias=f"{entity_type}-{bucket.value}-read",
             routing_key=tenant_id,
         )
+
+    @staticmethod
+    def _stable_hash(value: str) -> int:
+        return int(hashlib.sha256(value.encode("utf-8")).hexdigest(), 16)
 
 
 class IngestionPartitionPolicyEngine:
@@ -76,7 +85,7 @@ class IngestionPartitionPolicyEngine:
                 dedicated=True,
             )
 
-        partition_id = sum(map(ord, f"{tenant_id}:{entity_type}")) % self._shared_partition_count
+        partition_id = self._stable_hash(f"{tenant_id}:{entity_type}") % self._shared_partition_count
         partition_group = f"{entity_type}-shared-{partition_id:02d}"
         return IngestionPartitionPolicy(
             tenant_id=tenant_id,
@@ -85,3 +94,7 @@ class IngestionPartitionPolicyEngine:
             partition_group=partition_group,
             dedicated=False,
         )
+
+    @staticmethod
+    def _stable_hash(value: str) -> int:
+        return int(hashlib.sha256(value.encode("utf-8")).hexdigest(), 16)

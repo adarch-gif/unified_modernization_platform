@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from enum import StrEnum
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 from unified_modernization.observability.telemetry import NoopTelemetrySink, TelemetryEvent, TelemetrySink
 
@@ -62,9 +62,12 @@ class ResilientSearchBackend:
             for attempt in range(1, attempts + 1):
                 started_at = monotonic()
                 try:
-                    response = await asyncio.wait_for(
+                    response = cast(
+                        dict[str, Any],
+                        await asyncio.wait_for(
                         self._backend.query(request),
                         timeout=self._timeout_seconds,
+                        ),
                     )
                     self._record_success(attempt=attempt, duration_ms=(monotonic() - started_at) * 1000)
                     return response

@@ -56,4 +56,6 @@ class CanonicalDomainEvent(BaseModel):
 
     @property
     def ordering_key(self) -> str:
+        # Infrastructure publishers must use this as the broker ordering key so
+        # events for one logical entity stay causally ordered on the same lane.
         return f"{self.tenant_id}|{self.domain_name}|{self.logical_entity_id}"

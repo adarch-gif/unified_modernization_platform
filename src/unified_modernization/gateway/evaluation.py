@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from math import log2
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -71,7 +72,8 @@ class ShadowQualityGate:
         primary_metrics: QueryEvaluationMetrics | None = None,
         shadow_metrics: QueryEvaluationMetrics | None = None,
     ) -> ShadowQualityDecision:
-        overlap_rate = float(live_comparison.get("overlap_rate_at_k", 0.0))
+        overlap_rate_raw = live_comparison.get("overlap_rate_at_k", 0.0)
+        overlap_rate = float(overlap_rate_raw) if isinstance(overlap_rate_raw, (int, float)) else 0.0
         if primary_metrics is not None and shadow_metrics is not None:
             ndcg_drop = primary_metrics.ndcg_at_10 - shadow_metrics.ndcg_at_10
             if (
@@ -129,7 +131,9 @@ class ShadowQualityGate:
 class SearchEvaluationHarness:
     @staticmethod
     def extract_ids(response: dict[str, object], *, top_k: int | None = None) -> list[str]:
-        ids = [item.get("id") for item in response.get("results", []) if isinstance(item, dict)]
+        raw_results: Any = response.get("results", [])
+        results = raw_results if isinstance(raw_results, list) else []
+        ids = [item.get("id") for item in results if isinstance(item, dict)]
         normalized = [str(item) for item in ids if item is not None]
         if top_k is not None:
             return normalized[:top_k]

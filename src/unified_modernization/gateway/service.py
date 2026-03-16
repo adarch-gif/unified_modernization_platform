@@ -117,6 +117,7 @@ class SearchGatewayService:
                 return await self._elastic.query(elastic_request)
             self._telemetry_sink.increment("search.gateway.canary_routed", tags={"backend": "azure"})
             return await self._azure.query(azure_request)
+        raise RuntimeError(f"unsupported traffic mode {self._mode}")
 
     def _bucket(self, consumer_id: str) -> int:
         return int(hashlib.md5(consumer_id.encode("utf-8")).hexdigest(), 16) % 100

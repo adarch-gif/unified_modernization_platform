@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -12,7 +13,23 @@ from unified_modernization.projection.builder import ProjectionBuilder
 
 class SourceWatermark(BaseModel):
     source_name: str
+    source_type: Literal[
+        "cosmos_change_feed",
+        "spanner_change_stream",
+        "pubsub_snapshot",
+        "debezium_offset",
+        "kafka_offset",
+    ]
     position: str
+    captured_at_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class CheckpointStore(Protocol):
+    def load_position(self) -> int:
+        raise NotImplementedError
+
+    def save_position(self, position: int) -> None:
+        raise NotImplementedError
 
 
 class BackfillExecutionSummary(BaseModel):
@@ -45,12 +62,18 @@ class BackfillCoordinator:
         self,
         events: Iterable[CanonicalDomainEvent],
         captured_watermarks: list[SourceWatermark],
+        *,
+        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_every: int = 50_000,
         now_utc: datetime | None = None,
     ) -> BackfillExecutionResult:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
         summary = BackfillExecutionSummary()
+        start_from = checkpoint_store.load_position() if checkpoint_store is not None else 0
 
-        for event in events:
+        for index, event in enumerate(events):
+            if index < start_from:
+                continue
             summary.ingested_events += 1
             summary.last_event_time_utc = event.event_time_utc
             decision = self._projection_builder.upsert(event, now_utc=now)
@@ -59,6 +82,11 @@ class BackfillCoordinator:
                     summary.deleted_documents += 1
                 else:
                     summary.published_documents += 1
+            if checkpoint_store is not None and (index + 1) % checkpoint_every == 0:
+                checkpoint_store.save_position(index + 1)
+
+        if checkpoint_store is not None:
+            checkpoint_store.save_position(summary.ingested_events + start_from)
 
         summary.pending_documents = self._projection_builder.pending_count()
         instructions = [

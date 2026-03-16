@@ -29,7 +29,6 @@ class DependencyRule(BaseModel):
     owner: str
     required: bool = True
     freshness_ttl_seconds: int | None = None
-    field_owners: list[str] = Field(default_factory=list)
 
     def is_stale(self, event_time_utc: datetime, now_utc: datetime) -> bool:
         if self.freshness_ttl_seconds is None:
@@ -86,6 +85,8 @@ class ProjectionStateRecord(BaseModel):
     completeness_status: CompletenessStatus = CompletenessStatus.PARTIAL
     last_payload_hash: str | None = None
     entity_revision: int = 0
+    quarantine_reason: str | None = None
+    quarantine_at_utc: datetime | None = None
 
 
 class ProjectionEntityRecord(BaseModel):

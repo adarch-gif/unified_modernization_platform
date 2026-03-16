@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections import defaultdict
 from collections.abc import Mapping
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -84,7 +83,7 @@ class TelemetrySpan:
         )
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
         duration_ms = (monotonic() - self._started_at) * 1000
         tags = {key: str(value) for key, value in self._attributes.items()}
         self._sink.record_timing(self._name, duration_ms, tags=tags, trace_id=self._trace_id)
@@ -200,7 +199,7 @@ class StructuredLoggerTelemetrySink:
 
     def emit(self, event: TelemetryEvent | Mapping[str, Any]) -> None:
         normalized = InMemoryTelemetrySink._normalize_event(event)
-        self._logger.info(json.dumps(normalized.model_dump(), sort_keys=True))
+        self._logger.info("", extra={"json_fields": normalized.model_dump()})
 
     def increment(self, name: str, value: int = 1, *, tags: Mapping[str, str] | None = None) -> None:
         self.emit(

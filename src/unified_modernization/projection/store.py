@@ -5,7 +5,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from unified_modernization.contracts.projection import (
     FragmentRecord,
@@ -14,6 +14,7 @@ from unified_modernization.contracts.projection import (
     ProjectionMutationResult,
     ProjectionStateRecord,
     ProjectionStatus,
+    PublicationDecision,
 )
 
 try:
@@ -217,14 +218,14 @@ class SqliteProjectionStateStore:
 
     def __init__(self, database_path: str | Path = "projection_state.db") -> None:
         self._database_path = str(database_path)
-        self._connection = sqlite3.connect(self._database_path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._local = threading.local()
         self._initialize()
 
     def _initialize(self) -> None:
-        with self._connection:
-            self._connection.execute(
+        with sqlite3.connect(self._database_path) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS projection_fragments (
                     tenant_id TEXT NOT NULL,
@@ -237,7 +238,7 @@ class SqliteProjectionStateStore:
                 )
                 """
             )
-            self._connection.execute(
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS projection_states (
                     tenant_id TEXT NOT NULL,
@@ -250,12 +251,21 @@ class SqliteProjectionStateStore:
                 """
             )
 
+    def _conn(self) -> sqlite3.Connection:
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self._database_path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            self._local.connection = connection
+        return connection
+
     @staticmethod
     def _params(key: ProjectionKey) -> tuple[str, str, str, str]:
         return (key.tenant_id, key.domain_name, key.entity_type, key.logical_entity_id)
 
     def _load_fragments(self, key: ProjectionKey) -> dict[str, FragmentRecord]:
-        rows = self._connection.execute(
+        rows = self._conn().execute(
             """
             SELECT fragment_owner, payload_json
             FROM projection_fragments
@@ -269,7 +279,7 @@ class SqliteProjectionStateStore:
         }
 
     def _load_state(self, key: ProjectionKey) -> ProjectionStateRecord | None:
-        row = self._connection.execute(
+        row = self._conn().execute(
             """
             SELECT payload_json
             FROM projection_states
@@ -288,8 +298,9 @@ class SqliteProjectionStateStore:
         *,
         prior_fragment_owners: set[str],
     ) -> None:
+        connection = self._conn()
         for removed_owner in sorted(prior_fragment_owners - set(entity.fragments)):
-            self._connection.execute(
+            connection.execute(
                 """
                 DELETE FROM projection_fragments
                 WHERE tenant_id = ? AND domain_name = ? AND entity_type = ? AND logical_entity_id = ? AND fragment_owner = ?
@@ -297,7 +308,7 @@ class SqliteProjectionStateStore:
                 (*self._params(key), removed_owner),
             )
         for fragment in entity.fragments.values():
-            self._connection.execute(
+            connection.execute(
                 """
                 INSERT INTO projection_fragments (
                     tenant_id, domain_name, entity_type, logical_entity_id, fragment_owner, payload_json
@@ -309,7 +320,7 @@ class SqliteProjectionStateStore:
             )
 
         if entity.state is None:
-            self._connection.execute(
+            connection.execute(
                 """
                 DELETE FROM projection_states
                 WHERE tenant_id = ? AND domain_name = ? AND entity_type = ? AND logical_entity_id = ?
@@ -318,7 +329,7 @@ class SqliteProjectionStateStore:
             )
             return
 
-        self._connection.execute(
+        connection.execute(
             """
             INSERT INTO projection_states (
                 tenant_id, domain_name, entity_type, logical_entity_id, payload_json
@@ -352,7 +363,7 @@ class SqliteProjectionStateStore:
             entity.state = state
             return ProjectionMutationResult(
                 entity=entity,
-                decision={"publish": False, "state": state},
+                decision=PublicationDecision(publish=False, state=state),
             )
 
         self.mutate_entity(key, mutator)
@@ -367,7 +378,7 @@ class SqliteProjectionStateStore:
             entity.state = state.model_copy(deep=True)
             return ProjectionMutationResult(
                 entity=entity,
-                decision={"publish": False, "state": entity.state},
+                decision=PublicationDecision(publish=False, state=entity.state),
             )
 
         self.mutate_entity(key, mutator)
@@ -378,7 +389,8 @@ class SqliteProjectionStateStore:
         mutator: Callable[[ProjectionEntityRecord], ProjectionMutationResult],
     ) -> ProjectionMutationResult:
         with self._lock:
-            with self._connection:
+            connection = self._conn()
+            with connection:
                 fragments = self._load_fragments(key)
                 state = self._load_state(key)
                 entity = ProjectionEntityRecord(
@@ -400,7 +412,7 @@ class SqliteProjectionStateStore:
 
     def pending_count(self) -> int:
         with self._lock:
-            rows = self._connection.execute("SELECT payload_json FROM projection_states").fetchall()
+            rows = self._conn().execute("SELECT payload_json FROM projection_states").fetchall()
             terminal = _terminal_states()
             pending = 0
             for row in rows:
@@ -599,7 +611,7 @@ class SpannerProjectionStateStore:
             entity.state = state
             return ProjectionMutationResult(
                 entity=entity,
-                decision={"publish": False, "state": state},
+                decision=PublicationDecision(publish=False, state=state),
             )
 
         self.mutate_entity(key, mutator)
@@ -613,7 +625,7 @@ class SpannerProjectionStateStore:
             entity.state = state.model_copy(deep=True)
             return ProjectionMutationResult(
                 entity=entity,
-                decision={"publish": False, "state": entity.state},
+                decision=PublicationDecision(publish=False, state=entity.state),
             )
 
         self.mutate_entity(key, mutator)
@@ -650,7 +662,7 @@ class SpannerProjectionStateStore:
                 decision=result.decision.model_copy(deep=True),
             )
 
-        return self._database.run_in_transaction(transaction_body)
+        return cast(ProjectionMutationResult, self._database.run_in_transaction(transaction_body))
 
     def pending_count(self) -> int:
         sql = """

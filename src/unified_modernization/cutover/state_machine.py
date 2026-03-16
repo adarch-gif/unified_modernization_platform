@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import threading
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
+from typing import Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BackendPrimaryState(StrEnum):
@@ -44,19 +49,168 @@ _SEARCH_TRANSITIONS = {
 }
 
 
-class DomainMigrationState(BaseModel):
+class CutoverTransitionEvent(BaseModel):
     domain_name: str
-    backend_state: BackendPrimaryState = BackendPrimaryState.AZURE_PRIMARY
-    search_state: SearchServingState = SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK
+    track: str
+    from_state: str
+    to_state: str
+    operator: str
+    reason: str
+    timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    def transition_backend(self, target: BackendPrimaryState) -> None:
+
+class PersistedCutoverState(BaseModel):
+    domain_name: str
+    backend_state: BackendPrimaryState
+    search_state: SearchServingState
+    updated_at_utc: datetime
+
+
+class CutoverStateStore(Protocol):
+    def append(self, event: CutoverTransitionEvent) -> None:
+        raise NotImplementedError
+
+    def load_latest(self, domain_name: str) -> PersistedCutoverState | None:
+        raise NotImplementedError
+
+
+class InMemoryCutoverStateStore:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._states: dict[str, PersistedCutoverState] = {}
+        self._events: list[CutoverTransitionEvent] = []
+
+    def append(self, event: CutoverTransitionEvent) -> None:
+        with self._lock:
+            current = self._states.get(
+                event.domain_name,
+                PersistedCutoverState(
+                    domain_name=event.domain_name,
+                    backend_state=BackendPrimaryState.AZURE_PRIMARY,
+                    search_state=SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK,
+                    updated_at_utc=event.timestamp_utc,
+                ),
+            )
+            if event.track == "backend":
+                current.backend_state = BackendPrimaryState(event.to_state)
+            elif event.track == "search":
+                current.search_state = SearchServingState(event.to_state)
+            else:
+                raise ValueError(f"unknown cutover track {event.track!r}")
+            current.updated_at_utc = event.timestamp_utc
+            self._states[event.domain_name] = current.model_copy(deep=True)
+            self._events.append(event.model_copy(deep=True))
+
+    def load_latest(self, domain_name: str) -> PersistedCutoverState | None:
+        with self._lock:
+            state = self._states.get(domain_name)
+            return None if state is None else state.model_copy(deep=True)
+
+
+class JsonFileCutoverStateStore:
+    """Simple append-only JSONL store for local and pilot durability testing."""
+
+    def __init__(self, path: str | Path = "cutover_state.jsonl") -> None:
+        self._path = Path(path)
+        self._lock = threading.RLock()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._path.exists():
+            self._path.write_text("", encoding="utf-8")
+
+    def append(self, event: CutoverTransitionEvent) -> None:
+        with self._lock:
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(event.model_dump_json())
+                handle.write("\n")
+
+    def load_latest(self, domain_name: str) -> PersistedCutoverState | None:
+        with self._lock:
+            lines = [line.strip() for line in self._path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        backend_state = BackendPrimaryState.AZURE_PRIMARY
+        search_state = SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK
+        updated_at: datetime | None = None
+        found = False
+        for line in lines:
+            event = CutoverTransitionEvent.model_validate(json.loads(line))
+            if event.domain_name != domain_name:
+                continue
+            found = True
+            if event.track == "backend":
+                backend_state = BackendPrimaryState(event.to_state)
+            elif event.track == "search":
+                search_state = SearchServingState(event.to_state)
+            updated_at = event.timestamp_utc
+        if not found or updated_at is None:
+            return None
+        return PersistedCutoverState(
+            domain_name=domain_name,
+            backend_state=backend_state,
+            search_state=search_state,
+            updated_at_utc=updated_at,
+        )
+
+
+class DomainMigrationState:
+    def __init__(
+        self,
+        *,
+        domain_name: str,
+        store: CutoverStateStore | None = None,
+    ) -> None:
+        self.domain_name = domain_name
+        self._store = store or InMemoryCutoverStateStore()
+        saved = self._store.load_latest(domain_name)
+        self.backend_state = saved.backend_state if saved is not None else BackendPrimaryState.AZURE_PRIMARY
+        self.search_state = (
+            saved.search_state if saved is not None else SearchServingState.AZURE_SEARCH_PRIMARY_ELASTIC_DARK
+        )
+
+    def transition_backend(
+        self,
+        target: BackendPrimaryState,
+        *,
+        operator: str = "system",
+        reason: str = "manual_transition",
+    ) -> None:
         allowed = _BACKEND_TRANSITIONS[self.backend_state]
         if target not in allowed:
-            raise ValueError(f"invalid backend transition: {self.backend_state} -> {target}")
+            raise ValueError(
+                f"Invalid transition: {self.backend_state} -> {target}. "
+                f"Valid targets from this state: {sorted(item.value for item in allowed)}"
+            )
+        event = CutoverTransitionEvent(
+            domain_name=self.domain_name,
+            track="backend",
+            from_state=self.backend_state.value,
+            to_state=target.value,
+            operator=operator,
+            reason=reason,
+            timestamp_utc=datetime.now(UTC),
+        )
+        self._store.append(event)
         self.backend_state = target
 
-    def transition_search(self, target: SearchServingState) -> None:
+    def transition_search(
+        self,
+        target: SearchServingState,
+        *,
+        operator: str = "system",
+        reason: str = "manual_transition",
+    ) -> None:
         allowed = _SEARCH_TRANSITIONS[self.search_state]
         if target not in allowed:
-            raise ValueError(f"invalid search transition: {self.search_state} -> {target}")
+            raise ValueError(
+                f"Invalid transition: {self.search_state} -> {target}. "
+                f"Valid targets from this state: {sorted(item.value for item in allowed)}"
+            )
+        event = CutoverTransitionEvent(
+            domain_name=self.domain_name,
+            track="search",
+            from_state=self.search_state.value,
+            to_state=target.value,
+            operator=operator,
+            reason=reason,
+            timestamp_utc=datetime.now(UTC),
+        )
+        self._store.append(event)
         self.search_state = target

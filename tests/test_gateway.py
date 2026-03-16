@@ -44,6 +44,34 @@ def test_translate_orderby_and_facets() -> None:
     assert query["aggs"]["tier"]["terms"]["field"] == "tier"
 
 
+def test_translate_compound_filter_with_and_or_not() -> None:
+    translator = ODataTranslator({"Status": "status", "Tier": "tier", "Region": "region"})
+    query = translator.translate(
+        {
+            "$filter": "(Status eq 'ACTIVE' and Tier gt 3) or not Region eq 'EU'",
+        }
+    )
+
+    filter_clause = query["query"]["bool"]["filter"][0]
+    assert "bool" in filter_clause
+    assert "should" in filter_clause["bool"]
+    assert filter_clause["bool"]["minimum_should_match"] == 1
+
+
+def test_translate_filter_supports_escaped_apostrophes() -> None:
+    translator = ODataTranslator({"Author": "author"})
+    query = translator.translate({"$filter": "Author eq 'O''Reilly'"})
+
+    assert query["query"]["bool"]["filter"][0] == {"term": {"author": "O'Reilly"}}
+
+
+def test_translate_filter_rejects_unknown_fields() -> None:
+    translator = ODataTranslator({"Status": "status"})
+
+    with pytest.raises(ValueError):
+        translator.translate({"$filter": "Tier eq 'gold'"})
+
+
 class _FakeBackend:
     def __init__(self, response: dict) -> None:
         self.response = response
@@ -147,6 +175,19 @@ def test_evaluation_harness_calculates_ndcg_and_mrr() -> None:
     assert report.query_count == 1
     assert report.average_ndcg_at_10 > 0.7
     assert report.average_mrr == 1.0
+
+
+def test_evaluation_harness_respects_top_k_when_scoring_ndcg() -> None:
+    harness = SearchEvaluationHarness()
+    case = QueryEvaluationCase(
+        query_id="q2",
+        retrieved_ids=[f"doc-{index}" for index in range(1, 21)],
+        judgment=QueryJudgment(query_id="q2", graded_relevance={"doc-20": 3.0}),
+    )
+
+    metrics = harness.evaluate_case(case, k=10)
+
+    assert metrics.ndcg_at_10 == 0.0
 
 
 def test_shadow_quality_gate_emits_relevance_regression_event() -> None:

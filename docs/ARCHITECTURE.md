@@ -59,6 +59,8 @@ Historical migration must not overload the real-time event path. The backfill co
 
 - bulk side-load directly into the projection plane
 - explicit capture of source high watermarks
+- typed watermark formats so different source technologies are distinguishable at handoff
+- resumable checkpoints for long-running bulk loads
 - a deterministic handoff to streaming CDC for the delta gap
 - prioritization of rehydration or repair for entities left pending after side-load
 
@@ -92,6 +94,12 @@ Search cutover evidence must include more than overlap counts. The evaluation ha
 
 Backend and search state machines are separate because unified platform does not mean big-bang cutover.
 
+The cutover path is now restart-safe:
+
+- transitions are persisted as append-only events
+- current domain state is rehydrated from the persisted log on startup
+- operators can supply reason and actor metadata per transition
+
 ### Reconciliation
 
 The reconciliation engine now compares:
@@ -119,6 +127,8 @@ The repo now includes operational scaffolding around the core architecture:
 - `routing/tenant_policy.py` now includes a dedicated ingestion partition policy for whale tenants
 - `observability/telemetry.py` adds structured events, counters, timings, and trace-like spans
 - `gateway/bootstrap.py` makes resiliency and telemetry explicit deployment requirements instead of conventions
+- `gateway/asgi.py` adds API-key protection and request-size enforcement for the exposed gateway endpoints
+- `config/loader.py` removes handwritten per-domain Python policy construction
 
 ## Production evolution path
 
