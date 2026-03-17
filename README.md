@@ -1,11 +1,40 @@
 # Unified Modernization Platform
 
-Implementation starter for a unified modernization initiative that migrates:
+Implementation starter for migrating:
 
-- Azure AI Search to Elasticsearch
-- Azure SQL Database and Azure Cosmos DB to GCP operational stores
+- **Azure AI Search → Elasticsearch**
+- **Azure SQL / Cosmos DB → GCP Spanner / Firestore / AlloyDB**
 
-This repository is intentionally designed as a production-grade starter, not a fake "finished migration." It provides the core platform contracts and reusable components that should remain stable even while domain-level discovery is still incomplete.
+This is a production-grade starter, not a finished migration. It provides the core platform contracts and reusable components that stay stable while domain-level discovery continues.
+
+---
+
+## Documentation Map
+
+Read the documents in the order that matches your role. Each document is self-contained; you do not need to read preceding ones first.
+
+| # | Document | Audience | What it covers |
+|---|----------|----------|----------------|
+| 1 | [`docs/EXECUTIVE_GUIDE.md`](docs/EXECUTIVE_GUIDE.md) | Business stakeholders, executives | Business problem, solution, migration phases, risk management, governance |
+| 2 | [`TECHNICAL_PRIMER.md`](TECHNICAL_PRIMER.md) | Product owners, operations leads, TPMs | System components, data flows, traffic modes, configuration reference, monitoring signals, runbooks |
+| 3 | [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) | Engineers onboarding to the codebase | Module layout, runtime surfaces, config surfaces, local dev, test suite |
+| 4 | [`ARCHITECTURE_DECISIONS.md`](ARCHITECTURE_DECISIONS.md) | Principal engineers, architects | Every significant design decision — context, alternatives rejected, rationale, trade-offs, long-term consequences |
+| 5 | [`docs/TERRAFORM_DEPLOYMENT.md`](docs/TERRAFORM_DEPLOYMENT.md) | Engineers, DevOps | GCP infrastructure, Terraform variables, pilot deployment steps |
+| 6 | [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md) | Engineering leads, TPMs | What remains to be built, phase-by-phase |
+| 7 | [`docs/DOMAIN_ONBOARDING_TEMPLATE.md`](docs/DOMAIN_ONBOARDING_TEMPLATE.md) | Domain leads, engineers | Checklist for onboarding a new data domain |
+
+### Legacy redirect files
+
+These files exist only to preserve older links. Do not treat them as sources of truth.
+
+| File | Points to |
+|------|-----------|
+| `PLATFORM_OVERVIEW.md` | → `docs/EXECUTIVE_GUIDE.md` |
+| `docs/PRODUCT_OPERATIONS_PRIMER.md` | → `TECHNICAL_PRIMER.md` |
+| `docs/ADR_COMPENDIUM.md` | → `ARCHITECTURE_DECISIONS.md` |
+| `docs/ARCHITECTURE.md` | → `DEVELOPER_GUIDE.md` + `ARCHITECTURE_DECISIONS.md` |
+
+---
 
 ## What is implemented
 
@@ -47,8 +76,6 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Gateway smoke/load harness with JSON or JSONL case playback and latency/error reporting
 - Docker packaging for Cloud Run deployment
 - Terraform stack for pilot-grade GCP infrastructure deployment
-- Example config and implementation roadmap
-- Unit tests for the highest-risk logic
 
 ## What is not implemented yet
 
@@ -59,80 +86,83 @@ This repository is intentionally designed as a production-grade starter, not a f
 - Remaining domain-specific CDC envelopes and source-specific enrichments beyond the built-in Cosmos, Firestore, Debezium-style, and Spanner adapter set
 - Final Spanner versus Firestore versus AlloyDB decisions by domain
 
-## Repository layout
+---
+
+## Repository Layout
 
 ```text
 src/unified_modernization/
   adapters/         Source adapter interfaces and helpers
+  backfill/         Bulk side-load and stream handoff planning
+  config/           YAML-driven domain onboarding loader
   contracts/        Canonical event and projection models
   cutover/          Backend and search cutover state machines
-  config/           YAML-driven domain onboarding loader
   gateway/          Search Gateway logic and ASGI app
-  projection/       Projection builder and state handling
+  observability/    Telemetry protocol and OTLP bridge
+  projection/       Projection builder, runtime, publisher, and state stores
   reconciliation/   Reconciliation models and comparison logic
   routing/          Tenant routing policy engine
+
 docs/
-  ARCHITECTURE.md
-  IMPLEMENTATION_ROADMAP.md
-  DOMAIN_ONBOARDING_TEMPLATE.md
-  TERRAFORM_DEPLOYMENT.md
+  EXECUTIVE_GUIDE.md          ← doc 1
+  TERRAFORM_DEPLOYMENT.md     ← doc 5
+  IMPLEMENTATION_ROADMAP.md   ← doc 6
+  DOMAIN_ONBOARDING_TEMPLATE.md ← doc 7
+
+TECHNICAL_PRIMER.md           ← doc 2
+DEVELOPER_GUIDE.md            ← doc 3
+ARCHITECTURE_DECISIONS.md     ← doc 4
+
 examples/
   domain_config.yaml
-infra/
-  terraform/        GCP deployment stack for pilot environments
+  gateway_runtime.env.template
+
+infra/terraform/              GCP infrastructure for pilot deployments
+
 tests/
-  Projection, gateway, cutover, and reconciliation tests
+  Projection, gateway, cutover, reconciliation, and observability tests
 ```
 
-## Local usage
+---
 
-### Install in editable mode
+## Local Usage
 
-```powershell
+### Install
+
+```bash
 python -m pip install -e .[dev]
 ```
 
 ### Run tests
 
-```powershell
+```bash
 python -m pytest -q
 ```
 
 ### Run the translation-only ASGI app
 
-```powershell
+```bash
 uvicorn unified_modernization.gateway.asgi:app --app-dir src --reload
 ```
 
-### Run the full HTTP search gateway locally
+### Run the full HTTP search gateway
 
-```powershell
+```bash
 uvicorn unified_modernization.gateway.http_api:app --app-dir src --reload
 ```
 
 ### Run the gateway smoke/load harness
 
-```powershell
-python -m unified_modernization.gateway.harness `
-  --cases-file examples/search_harness_cases.jsonl `
-  --concurrency 8 `
+```bash
+python -m unified_modernization.gateway.harness \
+  --cases-file examples/search_harness_cases.jsonl \
+  --concurrency 8 \
   --iterations 20
 ```
 
-This command reuses the real gateway bootstraps and expects the concrete client env vars to be set, for example:
+The harness expects the concrete client env vars to be set — start from [`examples/gateway_runtime.env.template`](examples/gateway_runtime.env.template).
 
-```text
-UMP_ENVIRONMENT=prod
-UMP_GATEWAY_MODE=shadow
-UMP_AZURE_SEARCH_ENDPOINT=https://<service>.search.windows.net
-UMP_AZURE_SEARCH_DEFAULT_INDEX=customer-search
-UMP_ELASTICSEARCH_ENDPOINT=https://<elastic-cluster>
-UMP_ELASTICSEARCH_DEFAULT_INDEX=customerdocument-shared_a-read
-UMP_GATEWAY_FIELD_MAP=Status=status,Tier=tier,Region=region
-UMP_TELEMETRY_MODE=memory
-```
-
-If you want a timestamped artifact automatically written under `artifacts/gateway_harness`, use the wrapper:
+Or use the Windows wrapper that writes timestamped artifacts:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run_gateway_harness.ps1 `
@@ -142,34 +172,24 @@ powershell -ExecutionPolicy Bypass -File scripts/run_gateway_harness.ps1 `
   -Iterations 20
 ```
 
-Start from [gateway_runtime.env.template](examples/gateway_runtime.env.template) and fill in the real endpoint and credential values locally.
+### Health check
 
-### Health endpoint
-
-```text
+```
 GET /health
 ```
 
 ### Translate OData to Elasticsearch DSL
 
-```text
+```
 POST /translate
-{
-  "params": {
-    "$search": "gold customer",
-    "$filter": "Status eq 'ACTIVE'",
-    "$top": "10"
-  }
-}
+{ "params": { "$search": "gold customer", "$filter": "Status eq 'ACTIVE'", "$top": "10" } }
 ```
 
-## Design position
+---
 
-This repo follows one architectural rule above all others:
+## Design Position
 
-Build one unified modernization backbone, but keep backend-primary cutover and search-serving cutover independent.
-
-That means:
+One unified modernization backbone, but backend-primary cutover and search-serving cutover are independent.
 
 - one canonical event plane
 - one projection and reconciliation model
@@ -178,67 +198,24 @@ That means:
 
 But:
 
-- backend cutover remains independent by domain
-- search cutover remains independent by domain
+- backend cutover is independent per domain
+- search cutover is independent per domain
 - target-store decisions remain domain-specific
 
-## New production-grade seams in this repo
+---
 
-- `projection/store.py`
-  Durable control-plane seam with `InMemoryProjectionStateStore`, `SqliteProjectionStateStore`, and `SpannerProjectionStateStore`
-- `backfill/coordinator.py`
-  Bulk side-load, typed watermarks, resumable checkpoints, and stream handoff planning
-- `cutover/state_machine.py`
-  Persisted transition events with restart-safe cutover state rehydration across JSONL and Firestore-backed stores
-- `cutover/bootstrap.py`
-  Production-safe cutover bootstrap that forbids ephemeral in-memory state outside local/dev/test
-- `config/loader.py`
-  YAML loader that turns domain onboarding config into runtime dependency policies
-- `gateway/evaluation.py`
-  Live overlap metrics and offline judged relevance metrics such as `NDCG@10` and `MRR`
-- `gateway/service.py`
-  Canary-aware search flow that can automatically freeze Elastic ramp-up when judged shadow quality regresses
-- `gateway/clients.py`
-  Concrete Azure AI Search and Elasticsearch query backends that fit the gateway `SearchBackend` protocol
-- `gateway/bootstrap.py`
-  Production-safe gateway startup plus config-driven construction for the concrete Azure and Elasticsearch clients
-- `gateway/harness.py`
-  Smoke/load runner for the concrete gateway path with concurrency, latency percentiles, and shadow-signal reporting
-- `gateway/asgi.py`
-  API-key middleware, request-size limits, explicit `422` translation errors, and a testable ASGI app builder
-- `gateway/http_api.py`
-  Deployable HTTP surface for `SearchGatewayService`, including `/search`, `/translate`, and `/health`
-- `gateway/resilience.py`
-  Resilient backend wrapper for timeout, retry, and circuit-breaker behavior
-- `observability/telemetry.py`
-  Structured telemetry events, counters, timings, and trace-like spans
-- `observability/opentelemetry.py`
-  OpenTelemetry-compatible telemetry sink that maps the platform telemetry protocol to OTLP-ready traces and metrics
-- `observability/bootstrap.py`
-  Environment-driven telemetry sink selection for noop, memory, logger, or OTLP HTTP export modes
-- `scripts/run_gateway_harness.ps1`
-  Windows-friendly wrapper that loads env, runs the harness, and writes timestamped rollout evidence to `artifacts/`
-- `reconciliation/engine.py`
-  Snapshot reconciliation plus recursive bucketed anti-entropy, remote paginated bucket fetch, and bucket-level drill-down
-- `routing/tenant_policy.py`
-  Shared-index versus dedicated-index alias routing policy plus whale-tenant ingestion partitioning
-- `projection/bootstrap.py`
-  Runtime bootstrap helper that forbids in-memory projection state outside local/dev/test and can build the Elasticsearch publisher from config
-- `projection/runtime.py`
-  Backpressure, DLQ handling, and optional search-index publishing around projection processing
-- `projection/publisher.py`
-  Elasticsearch publisher with external versioning, tenant-aware alias routing, and bulk indexing support
-- `infra/terraform`
-  GCP infrastructure stack for Cloud Run, Spanner, Firestore, Pub/Sub, Artifact Registry, and Secret Manager
+## Immediate Next Steps
 
-## Immediate next steps
+1. Wire `SpannerProjectionStateStore`, `FirestoreCutoverStateStore`, and the concrete search clients to real cloud credentials.
+2. Run the gateway harness against real Azure and Elastic endpoints at target and 2× target concurrency; keep the report artifacts as rollout evidence.
+3. Switch telemetry from `memory`/`logger` to `otlp_http` in deployed environments.
+4. Replace local pilot-grade durability layers with managed production stores and secret-provider integration.
+5. Add remaining domain-specific CDC adapters not covered by the built-in Cosmos, Firestore, Debezium-style, and Spanner adapters.
 
-1. Wire `SpannerProjectionStateStore`, `FirestoreCutoverStateStore`, and the concrete search clients to real cloud credentials and managed environments.
-2. Run the gateway harness against real Azure and Elastic endpoints at target and 2x target concurrency, then keep the report artifacts as rollout evidence.
-3. Switch telemetry mode from memory/logger to OTLP HTTP or a production metrics backend in deployed environments.
-4. Replace local pilot-grade durability layers with managed production stores and secret-provider integration where required.
-5. Add any remaining domain-specific CDC envelopes and source-specific enrichments not covered by the built-in Cosmos, Firestore, Debezium-style, and Spanner adapters.
+See [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md) for the full phase-by-phase plan.
+
+---
 
 ## Status
 
-This is a working starter repository intended to accelerate implementation and reduce design drift while discovery continues.
+Working starter repository. Intended to accelerate implementation and reduce design drift while domain discovery continues.
